@@ -195,6 +195,11 @@ class Writer:
 
     def _required(self, table: str) -> dict[str, int | float]:
         rows = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        # Empty tables provide no evidence that nullable fields must be filled.
+        # Inventing zero values here creates dangling Core Data references such
+        # as ZMEDIAITEM=0 on ordinary text messages in a fresh account.
+        if not rows:
+            return {}
         result: dict[str, int | float] = {}
         for _, name, kind, *_ in self.conn.execute(f'PRAGMA table_info("{table}")'):
             kind = (kind or "").upper()

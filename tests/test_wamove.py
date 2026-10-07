@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import plistlib
 import sqlite3
 import struct
 import sys
@@ -16,7 +17,7 @@ from pyiosbackup import Backup as ReferenceBackup
 from fixtures import (ALICE, BOB_LID, BOB_PN, GROUP, ME, PASSWORD, UDID, make_backup, make_chatstorage, make_media,
                       make_msgstore)
 from wamove.android import crypt15, msgstore
-from wamove.cli import main
+from wamove.cli import Failure, account_prefix, main
 from wamove.ios import chatstorage, thumbs
 from wamove.ios.backup import CHATSTORAGE, DIRECTORY, WA_DOMAIN, Backup, BackupError, file_id, mbfile
 
@@ -110,6 +111,29 @@ def test_writer(tmp_path: Path) -> None:
     assert report.messages_written == 0
 
 
+def test_import_into_empty_account_preserves_nullable_relationships(tmp_path: Path) -> None:
+    make_msgstore(tmp_path / "msgstore.db")
+    make_media(tmp_path / "Media")
+    database = tmp_path / CHATSTORAGE
+    make_chatstorage(database)
+    conn = sqlite3.connect(database)
+    for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'ZWA%'").fetchall():
+        conn.execute(f'DELETE FROM "{table}"')
+    conn.commit()
+    conn.close()
+    archive = msgstore.parse(tmp_path / "msgstore.db")
+    writer = chatstorage.Writer(database, archive.lids)
+    report = writer.import_archive(archive, tmp_path / "Media")
+    writer.close()
+    assert report.messages_written > 0
+    assert chatstorage.verify(database) == []
+    conn = sqlite3.connect(database)
+    assert conn.execute("SELECT COUNT(*) FROM ZWAMESSAGE WHERE ZMESSAGETYPE=0 AND ZMEDIAITEM IS NOT NULL").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM ZWAMESSAGE WHERE ZGROUPMEMBER=0").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM ZWACHATSESSION WHERE ZSESSIONTYPE=1").fetchone()[0] > 0
+    conn.close()
+
+
 def write_png(path: Path, width: int, height: int) -> None:
     def chunk(kind: bytes, data: bytes) -> bytes:
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
@@ -199,25 +223,52 @@ def test_prune(tmp_path: Path) -> None:
         assert reopened.get(CHATSTORAGE) and reopened.get("") and reopened.check() == []
 
 
-def test_build_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("prefix", ["", "data/account-fixture/"])
+def test_build_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: str) -> None:
     work = tmp_path / "work"
     (work / "android").mkdir(parents=True)
     make_msgstore(work / "android" / "msgstore.db")
     make_media(work / "android" / "Media")
     make_chatstorage(tmp_path / CHATSTORAGE)
     make_backup(work / "ios" / "pristine" / UDID, tmp_path / CHATSTORAGE, PASSWORD)
+    if prefix:
+        preferences = tmp_path / "preferences.plist"
+        preferences.write_bytes(plistlib.dumps({"active-account": "account-fixture"}))
+        with Backup(work / "ios" / "pristine" / UDID, PASSWORD) as saved:
+            saved.put(prefix + CHATSTORAGE, tmp_path / CHATSTORAGE)
+            saved.put("Library/Preferences/group.net.whatsapp.WhatsApp.shared.plist", preferences)
     before = (work / "ios" / "pristine" / UDID / "Manifest.db").read_bytes()
     monkeypatch.setenv("WAMOVE_BACKUP_PASSWORD", PASSWORD)
     assert main(["--work", str(work), "build"]) == 0
     assert (work / "ios" / "pristine" / UDID / "Manifest.db").read_bytes() == before
     reference = ReferenceBackup.from_path(work / "ios" / "patched" / UDID, PASSWORD)
     database = tmp_path / "result.sqlite"
-    database.write_bytes(reference.get_entry_by_domain_and_path(WA_DOMAIN, CHATSTORAGE).read_bytes())
+    database.write_bytes(reference.get_entry_by_domain_and_path(WA_DOMAIN, prefix + CHATSTORAGE).read_bytes())
+    if prefix:
+        assert reference.get_entry_by_domain_and_path(WA_DOMAIN, CHATSTORAGE).read_bytes() == (tmp_path / CHATSTORAGE).read_bytes()
     assert chatstorage.verify(database) == []
     conn = sqlite3.connect(database)
     assert conn.execute("SELECT COUNT(*) FROM ZWAMESSAGE").fetchone()[0] == 13
     path = conn.execute("SELECT ZMEDIALOCALPATH FROM ZWAMEDIAITEM WHERE ZMEDIALOCALPATH IS NOT NULL").fetchone()[0]
     conn.close()
-    assert reference.get_entry_by_domain_and_path(WA_DOMAIN, "Message/" + path).read_bytes()
-    assert reference.get_entry_by_domain_and_path(WA_DOMAIN, CHATSTORAGE + "-wal").read_bytes() == b""
-    assert reference.get_entry_by_domain_and_path(WA_DOMAIN, CHATSTORAGE + "-shm").read_bytes() == b""
+    assert reference.get_entry_by_domain_and_path(WA_DOMAIN, prefix + "Message/" + path).read_bytes()
+    assert reference.get_entry_by_domain_and_path(WA_DOMAIN, prefix + CHATSTORAGE + "-wal").read_bytes() == b""
+    assert reference.get_entry_by_domain_and_path(WA_DOMAIN, prefix + CHATSTORAGE + "-shm").read_bytes() == b""
+
+
+def test_account_selection_fails_without_authoritative_preferences(tmp_path: Path) -> None:
+    make_chatstorage(tmp_path / CHATSTORAGE)
+    folder = make_backup(tmp_path / UDID, tmp_path / CHATSTORAGE, PASSWORD)
+    preferences = tmp_path / "preferences.plist"
+    with Backup(folder, PASSWORD) as saved:
+        saved.put("data/account-fixture/" + CHATSTORAGE, tmp_path / CHATSTORAGE)
+        with pytest.raises(Failure, match="unknown"):
+            account_prefix(saved)
+        preferences.write_bytes(plistlib.dumps({"active-account": "missing-account"}))
+        saved.put("Library/Preferences/group.net.whatsapp.WhatsApp.shared.plist", preferences)
+        with pytest.raises(Failure, match="no chat database"):
+            account_prefix(saved)
+        preferences.write_bytes(plistlib.dumps({"active-account": "../other"}))
+        saved.put("Library/Preferences/group.net.whatsapp.WhatsApp.shared.plist", preferences)
+        with pytest.raises(Failure, match="invalid"):
+            account_prefix(saved)

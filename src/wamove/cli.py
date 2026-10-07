@@ -5,8 +5,11 @@ import getpass
 import json
 import logging
 import os
+import plistlib
+import re
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -18,6 +21,40 @@ from .ios import chatstorage, device
 from .model import Archive
 
 CHATSTORAGE = ios_backup.CHATSTORAGE
+
+
+def account_prefix(saved: ios_backup.Backup) -> str:
+    """Resolve the active account; never silently import into an inactive one."""
+    preference = "Library/Preferences/group.net.whatsapp.WhatsApp.shared.plist"
+    account = None
+    with tempfile.TemporaryDirectory() as scratch:
+        path = Path(scratch) / "preferences.plist"
+        if saved.read(preference, path):
+            try:
+                account = plistlib.loads(path.read_bytes()).get("active-account")
+            except (plistlib.InvalidFileException, ValueError, OverflowError):
+                # Native plists can contain dates outside Python's datetime range.
+                # Extract just this field rather than rewriting the preferences.
+                if not shutil.which("plutil"):
+                    raise Failure("cannot read WhatsApp account preferences; native plutil is required")
+                result = subprocess.run(["plutil", "-extract", "active-account", "raw", "-o", "-", str(path)],
+                                        capture_output=True, text=True)
+                if result.returncode:
+                    raise Failure("cannot determine the active WhatsApp account")
+                account = result.stdout.strip()
+    if account is not None:
+        if not isinstance(account, str) or not re.fullmatch(r"[A-Za-z0-9-]+", account):
+            raise Failure("invalid active WhatsApp account identifier")
+        prefix = f"data/{account}/"
+        if not saved.get(prefix + CHATSTORAGE):
+            raise Failure("the active WhatsApp account has no chat database in this backup")
+        return prefix
+    nested = saved.conn.execute(
+        "SELECT 1 FROM Files WHERE domain=? AND relativePath LIKE 'data/%/ChatStorage.sqlite' LIMIT 1",
+        (ios_backup.WA_DOMAIN,)).fetchone()
+    if nested:
+        raise Failure("account databases exist but the active WhatsApp account is unknown")
+    return ""
 
 
 class Failure(Exception):
@@ -154,7 +191,7 @@ def backup(work: Work, args: argparse.Namespace) -> None:
     ios_backup.clone_tree(full, work.pristine / udid)
     with ios_backup.Backup(work.pristine / udid, password) as saved:
         saved.prune()
-        if not saved.get(CHATSTORAGE):
+        if not saved.get(account_prefix(saved) + CHATSTORAGE):
             raise Failure("WhatsApp is not in this backup: install it on the iPhone, register, and back up again")
         count = saved.count()
     print(f"  full backup kept in {full}")
@@ -174,8 +211,9 @@ def build(work: Work, args: argparse.Namespace) -> None:
     ios_backup.clone_tree(pristine, work.patched / udid)
     database = work.build / CHATSTORAGE
     with ios_backup.Backup(work.patched / udid, password) as target:
+        prefix = account_prefix(target)
         for name in (CHATSTORAGE, CHATSTORAGE + "-wal"):
-            target.read(name, work.build / name)
+            target.read(prefix + name, work.build / name)
         writer = chatstorage.Writer(database, archive.lids)
         media = None if args.no_media or not work.media.is_dir() else work.media
         (work.build / "thumbs").mkdir()
@@ -188,14 +226,14 @@ def build(work: Work, args: argparse.Namespace) -> None:
         print(f"  {report.messages_written} messages added, {report.messages_skipped} were already there")
         print(f"  {report.media_linked} media files found, {report.media_missing} missing on the Android phone, "
               f"{report.thumbnails} thumbnails made")
-        target.put(CHATSTORAGE, database)
+        target.put(prefix + CHATSTORAGE, database)
         empty = work.build / "empty"
         empty.write_bytes(b"")
         for suffix in ("-wal", "-shm"):
-            target.put(CHATSTORAGE + suffix, empty)
+            target.put(prefix + CHATSTORAGE + suffix, empty)
         total = len(report.media_files)
         for done, item in enumerate(report.media_files, 1):
-            target.put(item.relative_path, Path(item.source))
+            target.put(prefix + item.relative_path, Path(item.source))
             if done % 100 == 0 or done == total:
                 sys.stdout.write(f"\r  added {done}/{total} media files to the backup")
                 sys.stdout.flush()
@@ -216,8 +254,9 @@ def inspect(work: Work, args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory() as scratch:
         saved = ios_backup.Backup(pristine, backup_password(pristine))
         try:
+            prefix = account_prefix(saved)
             for name in (CHATSTORAGE, CHATSTORAGE + "-wal"):
-                saved.read(name, Path(scratch) / name)
+                saved.read(prefix + name, Path(scratch) / name)
             print(f"iPhone backup: {saved.count()} WhatsApp entries, encrypted: {saved.encrypted}")
         finally:
             saved.close()
