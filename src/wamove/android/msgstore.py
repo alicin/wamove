@@ -74,7 +74,7 @@ def _lid_names(conn: sqlite3.Connection, tables: dict[str, set[str]]) -> dict[st
 
 
 def _is_voice(mime: str | None, path: str | None) -> bool:
-    return bool(mime and "opus" in mime.lower()) or bool(path and "/WhatsApp Voice Notes/" in path)
+    return bool(mime and "opus" in mime.lower()) or bool(path and " Voice Notes/" in path)
 
 
 def parse(path: Path, contacts: dict[str, str] | None = None) -> Archive:

@@ -18,6 +18,7 @@ from pyiosbackup.keybag import Keybag
 from pyiosbackup.manifest_plist import ManifestPlist
 
 WA_DOMAIN = "AppDomainGroup-group.net.whatsapp.WhatsApp.shared"
+WA_BUSINESS_DOMAIN = "AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared"
 CHATSTORAGE = "ChatStorage.sqlite"
 FILE = 1
 DIRECTORY = 2
@@ -107,8 +108,9 @@ class Entry:
 
 
 class Backup:
-    def __init__(self, path: Path, password: str | None = None):
+    def __init__(self, path: Path, password: str | None = None, domain: str = WA_DOMAIN):
         self.path = path
+        self.domain = domain
         if not (path / "Manifest.db").is_file():
             raise BackupError(f"{path} is not an iPhone backup")
         manifest = plistlib.loads((path / "Manifest.plist").read_bytes())
@@ -161,16 +163,19 @@ class Backup:
     def payload_path(self, fid: str) -> Path:
         return self.path / fid[:2] / fid
 
-    def get(self, relative_path: str, domain: str = WA_DOMAIN) -> Entry | None:
+    def get(self, relative_path: str, domain: str | None = None) -> Entry | None:
+        domain = domain or self.domain
         row = self.conn.execute(
             "SELECT fileID, relativePath, flags, file FROM Files WHERE domain=? AND relativePath=?",
             (domain, relative_path)).fetchone()
         return Entry(*row) if row else None
 
-    def count(self, domain: str = WA_DOMAIN) -> int:
+    def count(self, domain: str | None = None) -> int:
+        domain = domain or self.domain
         return self.conn.execute("SELECT COUNT(*) FROM Files WHERE domain=?", (domain,)).fetchone()[0]
 
-    def read(self, relative_path: str, target: Path, domain: str = WA_DOMAIN) -> bool:
+    def read(self, relative_path: str, target: Path, domain: str | None = None) -> bool:
+        domain = domain or self.domain
         entry = self.get(relative_path, domain)
         if entry is None or entry.flags != FILE or entry.blob is None:
             return False
@@ -244,7 +249,8 @@ class Backup:
                 dst.write(out)
         return key, digest.digest(), size
 
-    def put(self, relative_path: str, source: Path, domain: str = WA_DOMAIN) -> None:
+    def put(self, relative_path: str, source: Path, domain: str | None = None) -> None:
+        domain = domain or self.domain
         self._ensure_parents(relative_path, domain)
         existing = self.get(relative_path, domain)
         if existing and existing.flags == FILE and existing.blob:
@@ -266,7 +272,8 @@ class Backup:
             (fid, domain, relative_path, FILE, blob))
         self.written.add(fid)
 
-    def prune(self, domain: str = WA_DOMAIN) -> None:
+    def prune(self, domain: str | None = None) -> None:
+        domain = domain or self.domain
         keep = {r[0] for r in self.conn.execute("SELECT fileID FROM Files WHERE domain=?", (domain,))}
         self.conn.execute("DELETE FROM Files WHERE domain<>?", (domain,))
         for bucket in self.path.iterdir():
@@ -277,7 +284,8 @@ class Backup:
                 if not any(bucket.iterdir()):
                     bucket.rmdir()
 
-    def check(self, domain: str = WA_DOMAIN) -> list[str]:
+    def check(self, domain: str | None = None) -> list[str]:
+        domain = domain or self.domain
         problems: list[str] = []
         rows = self.conn.execute(
             "SELECT fileID, relativePath, flags, file FROM Files WHERE domain=?", (domain,)).fetchall()

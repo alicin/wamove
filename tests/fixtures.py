@@ -87,12 +87,12 @@ def make_msgstore(path: Path) -> None:
     conn.close()
 
 
-def make_media(root: Path) -> None:
+def make_media(root: Path, prefix: str = "WhatsApp") -> None:
     for relative, data in {
-        "WhatsApp Images/IMG-001.jpg": b"\xff\xd8jpegdata!!",
-        "WhatsApp Voice Notes/202437/PTT-001.opus": b"OggS-opus",
-        "WhatsApp Stickers/STK-001.webp": b"RIFFwebp",
-        "WhatsApp Documents/report.pdf": b"%PDF-1.4" * 40,
+        f"{prefix} Images/IMG-001.jpg": b"\xff\xd8jpegdata!!",
+        f"{prefix} Voice Notes/202437/PTT-001.opus": b"OggS-opus",
+        f"{prefix} Stickers/STK-001.webp": b"RIFFwebp",
+        f"{prefix} Documents/report.pdf": b"%PDF-1.4" * 40,
     }.items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -180,7 +180,7 @@ def _pad(data: bytes) -> bytes:
     return padder.update(data) + padder.finalize()
 
 
-def make_backup(folder: Path, chatstorage: Path, password: str | None = None) -> Path:
+def make_backup(folder: Path, chatstorage: Path, password: str | None = None, domain: str = WA_DOMAIN) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     class_keys = {cls: os.urandom(32) for cls in range(1, 12)} if password else {}
     manifest: dict = {"IsEncrypted": bool(password), "Version": "10.0", "Lockdown": {"ProductVersion": "26.0"},
@@ -228,10 +228,10 @@ def make_backup(folder: Path, chatstorage: Path, password: str | None = None) ->
         (folder / fid[:2]).mkdir(exist_ok=True)
         (folder / fid[:2] / fid).write_bytes(stored)
 
-    add(WA_DOMAIN, "", None)
-    add(WA_DOMAIN, "Message", None)
-    add(WA_DOMAIN, CHATSTORAGE, chatstorage.read_bytes())
-    add(WA_DOMAIN, CHATSTORAGE + "-wal", b"")
+    add(domain, "", None)
+    add(domain, "Message", None)
+    add(domain, CHATSTORAGE, chatstorage.read_bytes())
+    add(domain, CHATSTORAGE + "-wal", b"")
     add("HomeDomain", "", None)
     add("HomeDomain", "Library/Preferences/com.apple.example.plist", b"unrelated")
     conn.commit()
