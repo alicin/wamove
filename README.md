@@ -26,7 +26,7 @@ Nothing is uploaded anywhere. Both phones talk to the Mac over USB.
 - `adb` (`brew install --cask android-platform-tools`)
 - A USB cable for each phone
 - Free disk space for a full iPhone backup plus the Android media. `wamove doctor` shows both.
-- WhatsApp (not WhatsApp Business) on both phones, with the same phone number
+- WhatsApp, or WhatsApp Business with `--business`, on both phones, with the same phone number (the same app on both, not one of each)
 
 ## Install
 
@@ -79,6 +79,18 @@ Finish the setup screens, reinstall WhatsApp from the App Store if its icon is f
 If the result is not right, `wamove rollback` restores the untouched WhatsApp-only copy.
 
 When you are happy, delete `~/wamove`. It holds your decrypted chats.
+
+## WhatsApp Business (this fork)
+
+Add `--business` to the first command, for example `wamove --business pull`. The choice is saved in the work folder
+(the `app` file), so `decrypt`, `backup`, `build` and `restore` follow it. It reads `com.whatsapp.w4b` on the Android
+phone and `AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared` in the iPhone backup. A work folder holds one app only;
+use `--work` with a new folder to move the other one.
+
+**Tested once, in October 2026**, from a Pixel 4 to an iPhone on iOS 26.7.1, with WhatsApp Business on both: about 618 chats
+(129 groups) and 357,000 messages came across, groups opened with their history, and media opened. That is one
+device pair, so run `wamove --business inspect` after `backup` and check the table counts before `build`, and keep the
+rollback copy until you are happy.
 
 ## Commands
 

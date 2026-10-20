@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 
 from . import __version__
+from .app import APPS, WHATSAPP, App
 from .android import adb, crypt15, msgstore
 from .ios import backup as ios_backup
 from .ios import chatstorage, device
@@ -36,6 +37,24 @@ class Work:
         self.pristine = root / "ios" / "pristine"
         self.patched = root / "ios" / "patched"
         self.build = root / "ios" / "build"
+        self.app_file = root / "app"
+
+    @property
+    def app(self) -> App:
+        """The app being moved, remembered in the work folder so later commands follow the first one."""
+        try:
+            return APPS[self.app_file.read_text().strip()]
+        except (OSError, KeyError):
+            return WHATSAPP
+
+    def choose(self, app: App) -> None:
+        if app is self.app and self.app_file.is_file():
+            return
+        if app is not self.app and (self.pristine.is_dir() or self.msgstore.is_file()):
+            raise Failure(f"this work folder already holds {self.app.title} data; use --work with a new folder "
+                          f"to move {app.title}")
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.app_file.write_text(app.key)
 
     def udid(self) -> str:
         found = [p.name for p in self.pristine.iterdir() if (p / "Manifest.db").is_file()] \
@@ -85,8 +104,8 @@ def print_stats(archive: Archive) -> None:
 def doctor(work: Work, args: argparse.Namespace) -> None:
     try:
         model = adb.device()
-        root = adb.whatsapp_root()
-        print(f"Android: {model}, WhatsApp backup found in {root}")
+        root = adb.whatsapp_root(work.app)
+        print(f"Android: {model}, {work.app.title} backup found in {root}")
     except adb.AdbError as e:
         print(f"Android: {e}")
     try:
@@ -110,7 +129,7 @@ def doctor(work: Work, args: argparse.Namespace) -> None:
 
 def pull(work: Work, args: argparse.Namespace) -> None:
     print(f"Android: {adb.device()}")
-    root = adb.whatsapp_root()
+    root = adb.whatsapp_root(work.app)
     work.android.mkdir(mode=0o700, parents=True, exist_ok=True)
     print("Copying the chat backup…")
     adb.pull(f"{root}/Databases/msgstore.db.crypt15", work.crypt15.parent)
@@ -124,7 +143,7 @@ def pull(work: Work, args: argparse.Namespace) -> None:
     if needed > free:
         raise Failure(f"the media needs {gigabytes(needed)} but only {gigabytes(free)} is free")
     print(f"Copying {gigabytes(needed)} of media…")
-    for folder in adb.media_dirs(root):
+    for folder in adb.media_dirs(root, work.app):
         adb.pull(f"{root}/Media/{folder}", work.media)
 
 
@@ -152,13 +171,14 @@ def backup(work: Work, args: argparse.Namespace) -> None:
     for stale in (work.pristine / udid, work.patched / udid):
         shutil.rmtree(stale, ignore_errors=True)
     ios_backup.clone_tree(full, work.pristine / udid)
-    with ios_backup.Backup(work.pristine / udid, password) as saved:
+    with ios_backup.Backup(work.pristine / udid, password, work.app.ios_domain) as saved:
         saved.prune()
         if not saved.get(CHATSTORAGE):
-            raise Failure("WhatsApp is not in this backup: install it on the iPhone, register, and back up again")
+            raise Failure(f"{work.app.title} is not in this backup: install it on the iPhone, register it with the same "
+                          "number, send one message, and back up again")
         count = saved.count()
     print(f"  full backup kept in {full}")
-    print(f"  WhatsApp-only copy with {count} entries in {work.pristine / udid}")
+    print(f"  {work.app.title}-only copy with {count} entries in {work.pristine / udid}")
 
 
 def build(work: Work, args: argparse.Namespace) -> None:
@@ -173,7 +193,7 @@ def build(work: Work, args: argparse.Namespace) -> None:
     shutil.rmtree(work.patched / udid, ignore_errors=True)
     ios_backup.clone_tree(pristine, work.patched / udid)
     database = work.build / CHATSTORAGE
-    with ios_backup.Backup(work.patched / udid, password) as target:
+    with ios_backup.Backup(work.patched / udid, password, work.app.ios_domain) as target:
         for name in (CHATSTORAGE, CHATSTORAGE + "-wal"):
             target.read(name, work.build / name)
         writer = chatstorage.Writer(database, archive.lids)
@@ -214,11 +234,11 @@ def inspect(work: Work, args: argparse.Namespace) -> None:
     udid = work.udid()
     pristine = work.pristine / udid
     with tempfile.TemporaryDirectory() as scratch:
-        saved = ios_backup.Backup(pristine, backup_password(pristine))
+        saved = ios_backup.Backup(pristine, backup_password(pristine), work.app.ios_domain)
         try:
             for name in (CHATSTORAGE, CHATSTORAGE + "-wal"):
                 saved.read(name, Path(scratch) / name)
-            print(f"iPhone backup: {saved.count()} WhatsApp entries, encrypted: {saved.encrypted}")
+            print(f"iPhone backup: {saved.count()} {work.app.title} entries, encrypted: {saved.encrypted}")
         finally:
             saved.close()
         database = Path(scratch) / CHATSTORAGE
@@ -241,11 +261,11 @@ def restore(work: Work, args: argparse.Namespace, source: Path) -> None:
     if phone.find_my is None:
         print("Could not tell whether Find My is on. If the restore fails, turn it off and try again.")
     password = backup_password(source / udid)
-    print("Restoring WhatsApp's data to the iPhone. Keep it plugged in; it restarts when done.")
+    print(f"Restoring {work.app.title}'s data to the iPhone. Keep it plugged in; it restarts when done.")
     print("Afterwards it goes through its setup screens. The home screen layout may be reset and some apps,")
-    print("WhatsApp included, may need downloading again; their data stays.")
+    print(f"{work.app.title} included, may need downloading again; their data stays.")
     device.restore(source, udid, password, args.udid)
-    print("Done. Reinstall WhatsApp if its icon is faded, open it, then turn Find My back on.")
+    print(f"Done. Reinstall {work.app.title} if its icon is faded, open it, then turn Find My back on.")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -255,6 +275,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="folder for everything wamove copies and builds (default ~/wamove)")
     parser.add_argument("--udid", help="the iPhone to use when several are connected")
     parser.add_argument("--contacts", type=Path, help="a .vcf export to name chats with")
+    parser.add_argument("--business", action="store_true",
+                        help="move WhatsApp Business instead of WhatsApp (remembered in the work folder)")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("doctor", help="check both phones and this Mac")
     command = commands.add_parser("pull", help="copy the WhatsApp backup and media off the Android phone")
@@ -270,6 +292,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="  %(message)s")
     work = Work(args.work.expanduser())
+    known = (Failure, adb.AdbError, crypt15.Crypt15Error, msgstore.MsgstoreError, ios_backup.BackupError,
+             chatstorage.ChatStorageError, device.DeviceError)
+    if args.business:
+        try:
+            work.choose(APPS["business"])
+        except Failure as e:
+            print(f"wamove: {e}", file=sys.stderr)
+            return 1
     actions = {
         "doctor": lambda: doctor(work, args),
         "pull": lambda: pull(work, args),
@@ -280,8 +310,6 @@ def main(argv: list[str] | None = None) -> int:
         "restore": lambda: restore(work, args, work.patched),
         "rollback": lambda: restore(work, args, work.pristine),
     }
-    known = (Failure, adb.AdbError, crypt15.Crypt15Error, msgstore.MsgstoreError, ios_backup.BackupError,
-             chatstorage.ChatStorageError, device.DeviceError)
     try:
         actions[args.command]()
     except known as e:

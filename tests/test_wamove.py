@@ -16,9 +16,10 @@ from pyiosbackup import Backup as ReferenceBackup
 from fixtures import (ALICE, BOB_LID, BOB_PN, GROUP, ME, PASSWORD, UDID, make_backup, make_chatstorage, make_media,
                       make_msgstore)
 from wamove.android import crypt15, msgstore
-from wamove.cli import main
+from wamove.app import BUSINESS, WHATSAPP
+from wamove.cli import Failure, Work, main
 from wamove.ios import chatstorage, thumbs
-from wamove.ios.backup import CHATSTORAGE, DIRECTORY, WA_DOMAIN, Backup, BackupError, file_id, mbfile
+from wamove.ios.backup import CHATSTORAGE, DIRECTORY, WA_BUSINESS_DOMAIN, WA_DOMAIN, Backup, BackupError, file_id, mbfile
 
 KEY = "0123456789abcdef" * 4
 
@@ -221,3 +222,69 @@ def test_build_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert reference.get_entry_by_domain_and_path(WA_DOMAIN, "Message/" + path).read_bytes()
     assert reference.get_entry_by_domain_and_path(WA_DOMAIN, CHATSTORAGE + "-wal").read_bytes() == b""
     assert reference.get_entry_by_domain_and_path(WA_DOMAIN, CHATSTORAGE + "-shm").read_bytes() == b""
+
+
+def test_business_profile() -> None:
+    assert BUSINESS.roots[0] == "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business"
+    assert "WhatsApp Business Images" in BUSINESS.media_dirs()
+    assert "WhatsApp Images" in WHATSAPP.media_dirs()
+    assert BUSINESS.ios_domain == WA_BUSINESS_DOMAIN != WHATSAPP.ios_domain
+
+
+def test_business_voice_note_is_detected() -> None:
+    assert msgstore._is_voice(None, "Media/WhatsApp Business Voice Notes/202437/PTT-001.opus")
+    assert msgstore._is_voice(None, "Media/WhatsApp Voice Notes/202437/PTT-001.opus")
+    assert not msgstore._is_voice("audio/mpeg", "Media/WhatsApp Business Audio/AUD-001.mp3")
+
+
+def test_work_remembers_business(tmp_path: Path) -> None:
+    work = Work(tmp_path / "work")
+    assert work.app is WHATSAPP
+    work.choose(BUSINESS)
+    assert Work(tmp_path / "work").app is BUSINESS
+    (work.pristine / "x").mkdir(parents=True)
+    with pytest.raises(Failure):
+        work.choose(WHATSAPP)
+
+
+def test_build_command_business(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    work = tmp_path / "work"
+    Work(work).choose(BUSINESS)
+    (work / "android").mkdir(parents=True)
+    make_msgstore(work / "android" / "msgstore.db")
+    make_media(work / "android" / "Media", prefix="WhatsApp Business")
+    make_chatstorage(tmp_path / CHATSTORAGE)
+    make_backup(work / "ios" / "pristine" / UDID, tmp_path / CHATSTORAGE, PASSWORD, domain=WA_BUSINESS_DOMAIN)
+    monkeypatch.setenv("WAMOVE_BACKUP_PASSWORD", PASSWORD)
+    assert main(["--work", str(work), "build"]) == 0
+    assert (work / "app").read_text() == "business"
+    reference = ReferenceBackup.from_path(work / "ios" / "patched" / UDID, PASSWORD)
+    database = tmp_path / "result.sqlite"
+    database.write_bytes(reference.get_entry_by_domain_and_path(WA_BUSINESS_DOMAIN, CHATSTORAGE).read_bytes())
+    assert chatstorage.verify(database) == []
+    conn = sqlite3.connect(database)
+    assert conn.execute("SELECT COUNT(*) FROM ZWAMESSAGE").fetchone()[0] == 13
+    assert conn.execute("SELECT COUNT(*) FROM ZWAMEDIAITEM WHERE ZMEDIALOCALPATH IS NOT NULL").fetchone()[0] == 4
+    path = conn.execute("SELECT ZMEDIALOCALPATH FROM ZWAMEDIAITEM WHERE ZMEDIALOCALPATH IS NOT NULL").fetchone()[0]
+    conn.close()
+    assert reference.get_entry_by_domain_and_path(WA_BUSINESS_DOMAIN, "Message/" + path).read_bytes()
+    with Backup(work / "ios" / "patched" / UDID, PASSWORD, WA_BUSINESS_DOMAIN) as patched:
+        domains = {r[0] for r in patched.conn.execute("SELECT DISTINCT domain FROM Files")}
+    assert WA_DOMAIN not in domains
+
+
+def test_regular_build_without_business_flag_ignores_business_domain(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    (work / "android").mkdir(parents=True)
+    make_msgstore(work / "android" / "msgstore.db")
+    make_chatstorage(tmp_path / CHATSTORAGE)
+    make_backup(work / "ios" / "pristine" / UDID, tmp_path / CHATSTORAGE, None, domain=WA_BUSINESS_DOMAIN)
+    assert main(["--work", str(work), "build"]) == 1
+
+
+def test_business_flag_refused_on_a_regular_work_folder(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    work = tmp_path / "work"
+    (work / "android").mkdir(parents=True)
+    make_msgstore(work / "android" / "msgstore.db")
+    assert main(["--work", str(work), "--business", "doctor"]) == 1
+    assert "already holds WhatsApp data" in capsys.readouterr().err
