@@ -10,6 +10,10 @@ ROOTS = (
     "/sdcard/Android/media/com.whatsapp/WhatsApp",
     "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp",
 )
+BUSINESS_ROOTS = (
+    "/sdcard/Android/media/com.whatsapp.w4b/WhatsApp Business",
+    "/storage/emulated/0/Android/media/com.whatsapp.w4b/WhatsApp Business",
+)
 MEDIA_DIRS = (
     "WhatsApp Images",
     "WhatsApp Video",
@@ -57,12 +61,14 @@ def device() -> str:
     return next((p.split(":", 1)[1] for p in ready[0] if p.startswith("model:")), ready[0][0])
 
 
-def whatsapp_root() -> str:
-    for root in ROOTS:
+def whatsapp_root(app: str = "personal", backup_format: str = "crypt15") -> str:
+    if app not in ("personal", "business"):
+        raise AdbError(f"unknown WhatsApp variant: {app}")
+    for root in BUSINESS_ROOTS if app == "business" else ROOTS:
         listing = shell(f'ls "{root}/Databases" 2>/dev/null')
-        if "msgstore.db.crypt15" in listing:
+        if f"msgstore.db.{backup_format}" in listing:
             return root
-        if "msgstore" in listing:
+        if "msgstore" in listing and backup_format == "crypt15":
             raise AdbError(
                 "the phone only has an older backup format: in WhatsApp turn on Settings > Chats > Chat backup > "
                 "End-to-end encrypted backup with a 64-digit key, then tap Back up"
@@ -71,7 +77,8 @@ def whatsapp_root() -> str:
 
 
 def media_dirs(root: str) -> list[str]:
-    return [d for d in MEDIA_DIRS if shell(f'[ -d "{root}/Media/{d}" ] && echo yes').strip() == "yes"]
+    folders = MEDIA_DIRS + tuple(d.replace("WhatsApp ", "WhatsApp Business ", 1) for d in MEDIA_DIRS)
+    return [d for d in folders if shell(f'[ -d "{root}/Media/{d}" ] && echo yes').strip() == "yes"]
 
 
 def remote_bytes(path: str) -> int:

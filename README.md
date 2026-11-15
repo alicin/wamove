@@ -154,3 +154,26 @@ wamove started from [wabridge](https://github.com/parvesh-rm/wabridge) by Parves
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+### Experimental WhatsApp Business support
+
+Use `--app business --work /path/to/a/separate-empty-business-folder` before each command.
+The default is personal WhatsApp. Never reuse one work folder for both accounts. Business
+uses the Android `com.whatsapp.w4b` storage and iOS `WhatsAppSMB.shared` backup domain.
+Business migrations are experimental and have only been tested with synthetic fixtures;
+labels, catalogue, business settings and actual device restores are not yet verified.
+The known group-chat display issue above also applies. Keep verified originals and do
+not rely on this migration as a complete backup. A 64-digit encrypted backup created
+on the source device is still required. On exFAT, full backup copies consume additional
+space because copy-on-write clones are unavailable.
+
+### Existing crypt14 backups (experimental)
+
+If you already have the matching WhatsApp crypt14 key file, `pull --format crypt14`
+selects that backup and `decrypt --format crypt14 --key-file /secure/path/key` opens
+it. The 131-byte WhatsApp key or its Java serialized byte array are supported. This
+cannot retrieve a key from a non-rooted Android phone: ADB alone cannot read another
+app's private data. A crypt15 end-to-end key is not a substitute for a crypt14 key.
+Never send the key to an issue or upload it with backups. Treat decrypted databases and
+unencrypted work folders as sensitive. Verified using a synthetic fixture and a public
+crypt14 sample, not yet a real migration.
