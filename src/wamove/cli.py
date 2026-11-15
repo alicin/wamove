@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 
 from . import __version__
-from .android import adb, crypt15, msgstore
+from .android import adb, crypt14, crypt15, msgstore
 from .ios import backup as ios_backup
 from .ios import chatstorage, device
 from .model import Archive
@@ -110,10 +110,10 @@ def doctor(work: Work, args: argparse.Namespace) -> None:
 
 def pull(work: Work, args: argparse.Namespace) -> None:
     print(f"Android: {adb.device()}")
-    root = adb.whatsapp_root(args.app)
+    root = adb.whatsapp_root(args.app, args.format)
     work.android.mkdir(mode=0o700, parents=True, exist_ok=True)
     print("Copying the chat backup…")
-    adb.pull(f"{root}/Databases/msgstore.db.crypt15", work.crypt15.parent)
+    adb.pull(f"{root}/Databases/msgstore.db.{args.format}", work.crypt15.parent)
     names = adb.contacts()
     work.contacts.write_text(json.dumps(names, ensure_ascii=False, indent=1))
     print(f"  {len(names)} contact numbers saved for naming chats")
@@ -129,10 +129,16 @@ def pull(work: Work, args: argparse.Namespace) -> None:
 
 
 def decrypt(work: Work, args: argparse.Namespace) -> None:
-    if not work.crypt15.is_file():
-        raise Failure("there is no Android backup yet; run `wamove pull` first")
-    key = crypt15.parse_key(secret("WAMOVE_KEY", "64-digit WhatsApp backup key", args.key_file))
-    crypt15.decrypt_file(work.crypt15, work.msgstore, key)
+    source = work.crypt15.with_suffix("." + args.format)
+    if not source.is_file():
+        raise Failure(f"there is no {args.format} Android backup yet; run `wamove pull` first")
+    if args.format == "crypt14":
+        if not args.key_file or not args.key_file.is_file():
+            raise Failure("crypt14 requires --key-file pointing to the matching WhatsApp key file")
+        crypt14.decrypt_file(source, work.msgstore, args.key_file)
+    else:
+        key = crypt15.parse_key(secret("WAMOVE_KEY", "64-digit WhatsApp backup key", args.key_file))
+        crypt15.decrypt_file(source, work.msgstore, key)
     os.chmod(work.msgstore, 0o600)
     print("Decrypted the Android chats:")
     print_stats(load_archive(work, args.contacts))
@@ -263,8 +269,10 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("doctor", help="check both phones and this Mac")
     command = commands.add_parser("pull", help="copy the WhatsApp backup and media off the Android phone")
     command.add_argument("--no-media", action="store_true")
+    command.add_argument("--format", choices=("crypt15", "crypt14"), default="crypt15")
     command = commands.add_parser("decrypt", help="decrypt the Android backup with its 64-digit key")
     command.add_argument("--key-file", type=Path)
+    command.add_argument("--format", choices=("crypt15", "crypt14"), default="crypt15")
     commands.add_parser("backup", help="back up the iPhone and keep a WhatsApp-only copy")
     command = commands.add_parser("build", help="add the Android chats to the WhatsApp-only copy")
     command.add_argument("--no-media", action="store_true")
@@ -284,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         "restore": lambda: restore(work, args, work.patched),
         "rollback": lambda: restore(work, args, work.pristine),
     }
-    known = (Failure, adb.AdbError, crypt15.Crypt15Error, msgstore.MsgstoreError, ios_backup.BackupError,
+    known = (Failure, adb.AdbError, crypt14.Crypt14Error, crypt15.Crypt15Error, msgstore.MsgstoreError, ios_backup.BackupError,
              chatstorage.ChatStorageError, device.DeviceError)
     try:
         marker = work.root / ".wamove-app"

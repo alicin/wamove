@@ -61,14 +61,14 @@ def device() -> str:
     return next((p.split(":", 1)[1] for p in ready[0] if p.startswith("model:")), ready[0][0])
 
 
-def whatsapp_root(app: str = "personal") -> str:
+def whatsapp_root(app: str = "personal", backup_format: str = "crypt15") -> str:
     if app not in ("personal", "business"):
         raise AdbError(f"unknown WhatsApp variant: {app}")
     for root in BUSINESS_ROOTS if app == "business" else ROOTS:
         listing = shell(f'ls "{root}/Databases" 2>/dev/null')
-        if "msgstore.db.crypt15" in listing:
+        if f"msgstore.db.{backup_format}" in listing:
             return root
-        if "msgstore" in listing:
+        if "msgstore" in listing and backup_format == "crypt15":
             raise AdbError(
                 "the phone only has an older backup format: in WhatsApp turn on Settings > Chats > Chat backup > "
                 "End-to-end encrypted backup with a 64-digit key, then tap Back up"

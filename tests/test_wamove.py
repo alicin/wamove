@@ -261,3 +261,39 @@ def test_work_directory_rejects_other_variant(tmp_path: Path, capsys: pytest.Cap
     (work / ".wamove-app").write_text("personal\n")
     assert main(["--app", "business", "--work", str(work), "build"]) == 1
     assert "different WhatsApp variant" in capsys.readouterr().err
+
+
+def test_crypt14_decrypts_with_131_byte_key_and_authenticates() -> None:
+    from wamove.android import crypt14
+    from hashlib import sha256
+    salt = os.urandom(16)
+    aes_key = os.urandom(32)
+    key = b'\x00\x01\x03' + os.urandom(32) + salt + sha256(salt).digest() + bytes(16) + aes_key
+    iv = os.urandom(16)
+    header = bytes([0x1A, 18, 0x0A, 16]) + iv
+    plain = b'SQLite format 3\x00' + b'test'
+    body = AESGCM(aes_key).encrypt(iv, zlib.compress(plain), None)
+    backup = bytes([len(header)]) + header + body
+    assert crypt14.decrypt(backup, key) == plain
+    assert crypt14.decrypt(backup + os.urandom(16), key) == plain
+    assert crypt14.decrypt(backup, crypt14._JAVA_PREFIX + key) == plain
+    with pytest.raises(crypt14.Crypt14Error):
+        crypt14.decrypt(backup[:-1] + bytes([backup[-1] ^ 1]), key)
+    with pytest.raises(crypt14.Crypt14Error):
+        crypt14.decrypt(backup, bytes(131))
+
+
+def test_cli_decrypt_crypt14_with_keyfile(tmp_path: Path) -> None:
+    from hashlib import sha256
+    work = tmp_path / 'work'
+    db = work / 'android' / 'Databases'
+    db.mkdir(parents=True)
+    make_msgstore(tmp_path / 'source.db')
+    salt, aes = os.urandom(16), os.urandom(32)
+    keyfile = tmp_path / 'key'
+    keyfile.write_bytes(b'\x00\x01\x03' + os.urandom(32) + salt + sha256(salt).digest() + bytes(16) + aes)
+    iv = os.urandom(16)
+    header = bytes([0x1a, 18, 0x0a, 16]) + iv
+    (db / 'msgstore.db.crypt14').write_bytes(bytes([len(header)]) + header + AESGCM(aes).encrypt(iv, zlib.compress((tmp_path / 'source.db').read_bytes()), None))
+    assert main(['--work', str(work), 'decrypt', '--format', 'crypt14', '--key-file', str(keyfile)]) == 0
+    assert (work / 'android' / 'msgstore.db').read_bytes() == (tmp_path / 'source.db').read_bytes()
