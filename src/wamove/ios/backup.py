@@ -18,6 +18,7 @@ from pyiosbackup.keybag import Keybag
 from pyiosbackup.manifest_plist import ManifestPlist
 
 WA_DOMAIN = "AppDomainGroup-group.net.whatsapp.WhatsApp.shared"
+BUSINESS_DOMAIN = "AppDomainGroup-group.net.whatsapp.WhatsAppSMB.shared"
 CHATSTORAGE = "ChatStorage.sqlite"
 FILE = 1
 DIRECTORY = 2

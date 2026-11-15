@@ -221,3 +221,43 @@ def test_build_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert reference.get_entry_by_domain_and_path(WA_DOMAIN, "Message/" + path).read_bytes()
     assert reference.get_entry_by_domain_and_path(WA_DOMAIN, CHATSTORAGE + "-wal").read_bytes() == b""
     assert reference.get_entry_by_domain_and_path(WA_DOMAIN, CHATSTORAGE + "-shm").read_bytes() == b""
+
+
+def test_business_build_uses_only_business_domain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from wamove.ios.backup import BUSINESS_DOMAIN
+
+    work = tmp_path / "work"
+    (work / "android").mkdir(parents=True)
+    (work / ".wamove-app").write_text("business\n")
+    make_msgstore(work / "android" / "msgstore.db")
+    make_media(work / "android" / "Media")
+    make_chatstorage(tmp_path / CHATSTORAGE)
+    folder = make_backup(work / "ios" / "pristine" / UDID, tmp_path / CHATSTORAGE)
+    conn = sqlite3.connect(folder / "Manifest.db")
+    rows = conn.execute("SELECT fileID, relativePath FROM Files WHERE domain=?", (WA_DOMAIN,)).fetchall()
+    for old, rel in rows:
+        new = file_id(BUSINESS_DOMAIN, rel)
+        old_path, new_path = folder / old[:2] / old, folder / new[:2] / new
+        if old_path.exists():
+            new_path.parent.mkdir(exist_ok=True)
+            old_path.rename(new_path)
+        conn.execute("UPDATE Files SET domain=?, fileID=? WHERE fileID=?", (BUSINESS_DOMAIN, new, old))
+    conn.commit()
+    conn.close()
+    assert main(["--app", "business", "--work", str(work), "build"]) == 0
+    reference = ReferenceBackup.from_path(work / "ios" / "patched" / UDID, "")
+    assert reference.get_entry_by_domain_and_path(BUSINESS_DOMAIN, CHATSTORAGE).read_bytes().startswith(b"SQLite format 3")
+
+
+def test_business_android_root_does_not_select_personal(monkeypatch: pytest.MonkeyPatch) -> None:
+    from wamove.android import adb
+    monkeypatch.setattr(adb, "shell", lambda command: "msgstore.db.crypt15" if "com.whatsapp.w4b" in command else "")
+    assert "com.whatsapp.w4b" in adb.whatsapp_root("business")
+
+
+def test_work_directory_rejects_other_variant(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".wamove-app").write_text("personal\n")
+    assert main(["--app", "business", "--work", str(work), "build"]) == 1
+    assert "different WhatsApp variant" in capsys.readouterr().err
