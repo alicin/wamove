@@ -121,9 +121,10 @@ Not moved: system messages ("X joined"), deleted-message markers, call logs, rea
 
 ## Known issues
 
-Tested once, in September 2026, from a Pixel 10 Pro XL to an iPhone on iOS 27.0: 64 one-to-one chats with about 25,000 messages and 889 media files came across, with thumbnails, and media opened.
+Tested in September 2026, from a Pixel 10 Pro XL to an iPhone on iOS 27.0: 64 one-to-one chats with about 25,000 messages and 889 media files came across, with thumbnails, and media opened. The history of group chats was written to the database but did not show up in WhatsApp.
 
-- The history of **group chats** was written to the database but did not show up in WhatsApp after the restore. The cause is not known yet.
+`build` was writing some fields differently from how WhatsApp writes them: each chat's message counter, the position of an identity notice that groups carry, which message points back at its chat as the latest one, and the status of messages sent in groups. After fixing those, it was tested again in November 2026, from an Android 16 phone to an iPhone on iOS 27.2.1 with WhatsApp 26.45.75. Group and one-to-one history both showed up, and messages sent and received afterwards were still there after WhatsApp was reopened. All the fixes went in together, so it is not known which of them the groups needed.
+
 - WhatsApp changes its database between versions. If `build` fails its checks, WhatsApp on the iPhone has probably changed something wamove does not know about yet. Please open an issue with the output of `wamove inspect`.
 
 ## Troubleshooting

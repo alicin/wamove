@@ -89,7 +89,7 @@ def test_writer(tmp_path: Path) -> None:
         assert [r[0] for r in rows] == list(range(1, len(rows) + 1))
         assert [r[1] for r in rows] == sorted(r[1] for r in rows)
     counters = dict(conn.execute("SELECT Z_PK, ZMESSAGECOUNTER FROM ZWACHATSESSION"))
-    assert counters == {1: 8, 2: 3, 3: 2}
+    assert counters == {1: 9, 2: 4, 3: 3}  # one past the last position: WhatsApp's next message goes there
     hashed = conn.execute("SELECT i.ZVCARDNAME FROM ZWAMESSAGE m JOIN ZWAMEDIAITEM i ON i.Z_PK = m.ZMEDIAITEM "
                           "WHERE m.ZSTANZAID='K102'").fetchone()[0]
     assert hashed == base64.b64encode(hashlib.sha256(b"\xff\xd8jpegdata!!").digest()).decode()
@@ -108,6 +108,42 @@ def test_writer(tmp_path: Path) -> None:
     report = again.import_archive(msgstore.parse(tmp_path / "msgstore.db"), tmp_path / "Media")
     again.close()
     assert report.messages_written == 0
+
+
+def test_writer_keeps_whatsapps_invariants(tmp_path: Path) -> None:
+    make_msgstore(tmp_path / "msgstore.db")
+    database = tmp_path / CHATSTORAGE
+    make_chatstorage(database)
+    conn = sqlite3.connect(database)
+    conn.execute("ALTER TABLE ZWACHATSESSION ADD COLUMN ZIDENTITYVERIFICATIONEPOCH INTEGER")
+    # A group as WhatsApp syncs it at registration: notices at 1 and 203 with the epoch on the second,
+    # a sent text after them, the counter one past it, and only the last message pointing back at the chat.
+    conn.executemany(
+        "INSERT INTO ZWAMESSAGE (Z_PK, Z_ENT, Z_OPT, ZISFROMME, ZMESSAGETYPE, ZSORT, ZCHATSESSION, ZMESSAGEDATE, "
+        "ZSTANZAID, ZMESSAGESTATUS, ZLASTSESSION) VALUES (?, 6, 1, ?, ?, ?, 2, ?, ?, ?, ?)",
+        [(2, 0, 10, 1, 600000000.0, "N1", 0, None),
+         (3, 0, 6, 203, 600000000.0, "N203", 0, None),
+         (4, 1, 0, 204, 600000001.0, "N204", 6, 2)])
+    conn.execute("UPDATE ZWACHATSESSION SET ZIDENTITYVERIFICATIONEPOCH=203, ZMESSAGECOUNTER=205, ZLASTMESSAGE=4, "
+                 "ZLASTMESSAGEDATE=600000001.0 WHERE Z_PK=2")
+    conn.execute("UPDATE Z_PRIMARYKEY SET Z_MAX=4 WHERE Z_NAME='WAMessage'")
+    conn.commit()
+    conn.close()
+    archive = msgstore.parse(tmp_path / "msgstore.db")
+    writer = chatstorage.Writer(database, archive.lids)
+    writer.import_archive(archive, None)
+    writer.close()
+    assert chatstorage.verify(database) == []
+    conn = sqlite3.connect(database)
+    epoch, counter, last = conn.execute(
+        "SELECT ZIDENTITYVERIFICATIONEPOCH, ZMESSAGECOUNTER, ZLASTMESSAGE FROM ZWACHATSESSION WHERE Z_PK=2").fetchone()
+    sorts = dict(conn.execute("SELECT ZSTANZAID, ZSORT FROM ZWAMESSAGE WHERE ZCHATSESSION=2"))
+    assert epoch == sorts["N203"]
+    assert counter == max(sorts.values()) + 1
+    assert conn.execute("SELECT Z_PK FROM ZWAMESSAGE WHERE ZLASTSESSION=2").fetchall() == [(last,)]
+    # Sent messages copy the status of sent text in the same kind of chat, not of outgoing notices.
+    status = dict(conn.execute("SELECT ZSTANZAID, ZMESSAGESTATUS FROM ZWAMESSAGE WHERE ZSTANZAID IN ('K112', 'K103')"))
+    assert status == {"K112": 6, "K103": 8}
 
 
 def write_png(path: Path, width: int, height: int) -> None:

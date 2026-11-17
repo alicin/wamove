@@ -157,22 +157,37 @@ class Writer:
             "msg_spot": self._mode("SELECT ZSPOTLIGHTSTATUS FROM ZWAMESSAGE", -32768),
             "msg_status_in": self._mode(
                 "SELECT ZMESSAGESTATUS FROM ZWAMESSAGE WHERE ZISFROMME=0 AND ZMESSAGETYPE=0", 0),
-            "msg_status_out": self._mode("SELECT ZMESSAGESTATUS FROM ZWAMESSAGE WHERE ZISFROMME=1", 8),
+            # Outgoing notices (e.g. type 76) carry other statuses than sent text, so prefer real text rows.
+            "msg_status_out": self._mode(
+                "SELECT ZMESSAGESTATUS FROM ZWAMESSAGE WHERE ZISFROMME=1 AND ZMESSAGETYPE=0",
+                self._mode("SELECT ZMESSAGESTATUS FROM ZWAMESSAGE WHERE ZISFROMME=1", 8)),
             "sess_flags_1to1": self._mode("SELECT ZFLAGS FROM ZWACHATSESSION WHERE ZSESSIONTYPE=0", 272),
             "sess_flags_group": self._mode("SELECT ZFLAGS FROM ZWACHATSESSION WHERE ZSESSIONTYPE=1", 256),
             "sess_spot_1to1": self._mode("SELECT ZSPOTLIGHTSTATUS FROM ZWACHATSESSION WHERE ZSESSIONTYPE=0", -5),
             "sess_spot_group": self._mode("SELECT ZSPOTLIGHTSTATUS FROM ZWACHATSESSION WHERE ZSESSIONTYPE=1", 1),
             "media_origin": self._mode("SELECT ZMEDIAORIGIN FROM ZWAMEDIAITEM WHERE ZMEDIALOCALPATH IS NOT NULL", 0),
             "media_cloud": self._mode("SELECT ZCLOUDSTATUS FROM ZWAMEDIAITEM WHERE ZMEDIALOCALPATH IS NOT NULL", 0),
-            "event_in": self._mode("SELECT ZGROUPEVENTTYPE FROM ZWAMESSAGE WHERE ZISFROMME=0 AND ZMESSAGETYPE NOT IN "
-                                   f"{SYSTEM_TYPES}", 0),
-            "event_out": self._mode("SELECT ZGROUPEVENTTYPE FROM ZWAMESSAGE WHERE ZISFROMME=1 AND ZMESSAGETYPE NOT IN "
-                                    f"{SYSTEM_TYPES}", 0),
+            "sess_etag_group": self._mode("SELECT ZETAG FROM ZWACHATSESSION WHERE ZSESSIONTYPE=1"),
+            "sess_etag_1to1": self._mode("SELECT ZETAG FROM ZWACHATSESSION WHERE ZSESSIONTYPE=0"),
         }
+        # Group and private chats are learned separately so one never inherits the other's values;
+        # a session type without native rows falls back to whatever the other type shows.
+        for me, direction in ((0, "in"), (1, "out")):
+            for key, column, where, default in (
+                    ("event", "ZGROUPEVENTTYPE", f"m.ZMESSAGETYPE NOT IN {SYSTEM_TYPES}", 0),
+                    ("status", "ZMESSAGESTATUS", "m.ZMESSAGETYPE=0", conv[f"msg_status_{direction}"])):
+                sql = (f"SELECT m.{column} FROM ZWAMESSAGE m JOIN ZWACHATSESSION s ON s.Z_PK=m.ZCHATSESSION "
+                       f"WHERE m.ZISFROMME={me} AND {where}")
+                anywhere = self._mode(sql, default)
+                for session_type, label in ((GROUP, "group"), (INDIVIDUAL, "1to1")):
+                    conv[f"{key}_{direction}_{label}"] = self._mode(sql + f" AND s.ZSESSIONTYPE={session_type}",
+                                                                   anywhere)
         conv["flags_by_type"] = {}
-        for from_me, kind, flags, _ in self.conn.execute(
-                "SELECT ZISFROMME, ZMESSAGETYPE, ZFLAGS, COUNT(*) FROM ZWAMESSAGE WHERE ZFLAGS IS NOT NULL "
-                "GROUP BY 1, 2, 3 ORDER BY 4"):
+        for session_type, from_me, kind, flags, _ in self.conn.execute(
+                "SELECT s.ZSESSIONTYPE, m.ZISFROMME, m.ZMESSAGETYPE, m.ZFLAGS, COUNT(*) FROM ZWAMESSAGE m "
+                "JOIN ZWACHATSESSION s ON s.Z_PK=m.ZCHATSESSION WHERE m.ZFLAGS IS NOT NULL "
+                "GROUP BY 1, 2, 3, 4 ORDER BY 5"):
+            conv["flags_by_type"][f"{session_type}:{from_me}:{kind}"] = flags
             conv["flags_by_type"][f"{from_me}:{kind}"] = flags
         conv["pushname_is_blob"] = _is_blob(self._sample(
             "SELECT ZPUSHNAME FROM ZWAMESSAGE WHERE ZPUSHNAME IS NOT NULL AND ZPUSHNAME<>''"))
@@ -242,20 +257,47 @@ class Writer:
     def import_archive(self, archive: Archive, media_root: Path | None, thumbnails: Path | None = None) -> Report:
         report = Report()
         self.thumbnails = thumbnails
+        anchors = self._epoch_anchors()
         touched: set[int] = set()
         for chat in archive.chats:
             session = self._import_chat(chat, archive, report, str(media_root) if media_root else None)
             if session is not None:
                 touched.add(session)
         for session in touched:
-            rows = self.conn.execute(
-                "SELECT Z_PK FROM ZWAMESSAGE WHERE ZCHATSESSION=? ORDER BY ZMESSAGEDATE, Z_PK", (session,)).fetchall()
-            self.conn.executemany("UPDATE ZWAMESSAGE SET ZSORT=? WHERE Z_PK=?",
-                                  [(i, r[0]) for i, r in enumerate(rows, 1)])
+            self._renumber(session, anchors.get(session))
         for name, entity in self.entities.items():
             self.conn.execute("UPDATE Z_PRIMARYKEY SET Z_MAX=? WHERE Z_NAME=?", (entity["max"], name))
         self.conn.commit()
         return report
+
+    def _epoch_anchors(self) -> dict[int, int]:
+        """The message each chat's ZIDENTITYVERIFICATIONEPOCH points at, by ZSORT, before anything moves."""
+        if "ZIDENTITYVERIFICATIONEPOCH" not in self.columns["ZWACHATSESSION"]:
+            return {}
+        return dict(self.conn.execute(
+            "SELECT s.Z_PK, MIN(m.Z_PK) FROM ZWACHATSESSION s JOIN ZWAMESSAGE m "
+            "ON m.ZCHATSESSION = s.Z_PK AND m.ZSORT = s.ZIDENTITYVERIFICATIONEPOCH "
+            "WHERE s.ZIDENTITYVERIFICATIONEPOCH > 0 GROUP BY s.Z_PK"))
+
+    def _renumber(self, session: int, anchor: int | None) -> None:
+        """Order a chat by date and restore the invariants WhatsApp's own rows keep.
+
+        ZSORT runs 1..n per chat, and WhatsApp numbers its next message from ZMESSAGECOUNTER, so the
+        counter must be n + 1. The epoch must keep pointing at the same notice it pointed at before.
+        WAMessage.lastSession is the inverse of WAChatSession.lastMessage, so only that message may point back.
+        """
+        rows = self.conn.execute(
+            "SELECT Z_PK FROM ZWAMESSAGE WHERE ZCHATSESSION=? ORDER BY ZMESSAGEDATE, Z_PK", (session,)).fetchall()
+        sorts = {pk: i for i, (pk,) in enumerate(rows, 1)}
+        self.conn.executemany("UPDATE ZWAMESSAGE SET ZSORT=? WHERE Z_PK=?", [(i, pk) for pk, i in sorts.items()])
+        values: dict = {"ZMESSAGECOUNTER": len(rows) + 1}
+        if anchor in sorts:
+            values["ZIDENTITYVERIFICATIONEPOCH"] = sorts[anchor]
+        self.update("ZWACHATSESSION", session, values)
+        last = self.conn.execute("SELECT ZLASTMESSAGE FROM ZWACHATSESSION WHERE Z_PK=?", (session,)).fetchone()[0]
+        self.conn.execute("UPDATE ZWAMESSAGE SET ZLASTSESSION=NULL WHERE ZLASTSESSION=?", (session,))
+        if last is not None:
+            self.conn.execute("UPDATE ZWAMESSAGE SET ZLASTSESSION=? WHERE Z_PK=?", (session, last))
 
     def close(self) -> None:
         self.conn.commit()
@@ -284,6 +326,7 @@ class Writer:
             "ZIDENTITYVERIFICATIONSTATE": 0,
             "ZFLAGS": conv["sess_flags_group"] if chat.is_group else conv["sess_flags_1to1"],
             "ZSPOTLIGHTSTATUS": conv["sess_spot_group"] if chat.is_group else conv["sess_spot_1to1"],
+            "ZETAG": conv["sess_etag_group"] if chat.is_group else conv["sess_etag_1to1"],
             "ZLASTMESSAGEDATE": cocoa(chat.messages[-1].timestamp_ms),
         })
         report.sessions_created += 1
@@ -333,7 +376,6 @@ class Writer:
         seen = {r[0] for r in self.conn.execute(
             "SELECT ZSTANZAID FROM ZWAMESSAGE WHERE ZCHATSESSION=? AND ZSTANZAID IS NOT NULL", (session,))}
         last_pk = last_date = last_text = None
-        written = 0
         for message in chat.messages:
             if message.key_id in seen:
                 report.messages_skipped += 1
@@ -346,17 +388,15 @@ class Writer:
             last_pk = self._message(chat, session, message, member, archive, report, media_root, media_dir)
             last_date = cocoa(message.timestamp_ms)
             last_text = message.text if message.kind is Kind.TEXT else last_text
-            written += 1
             report.messages_written += 1
         if last_pk is None:
             return None
-        values: dict = {"ZMESSAGECOUNTER": ((existing["ZMESSAGECOUNTER"] or 0) if existing else 0) + written}
         previous = existing["ZLASTMESSAGEDATE"] if existing else None
         if previous is None or last_date >= previous:
-            values.update({"ZLASTMESSAGE": last_pk, "ZLASTMESSAGEDATE": last_date})
-            if not self.conv["lasttext_is_blob"]:
-                values["ZLASTMESSAGETEXT"] = last_text
-        self.update("ZWACHATSESSION", session, values)
+            # A protobuf preview describes the message it came with; new chats have none, so drop the stale one.
+            preview = None if self.conv["lasttext_is_blob"] else last_text
+            self.update("ZWACHATSESSION", session,
+                        {"ZLASTMESSAGE": last_pk, "ZLASTMESSAGEDATE": last_date, "ZLASTMESSAGETEXT": preview})
         return session
 
     def _message(self, chat: Chat, session: int, message: Message, member: int | None, archive: Archive,
@@ -373,16 +413,18 @@ class Writer:
         if not message.from_me and message.sender_jid and not conv["pushname_is_blob"]:
             push_name = archive.names.get(message.sender_jid)
         peer = chat.lid if conv["from_lid"] and chat.lid else chat.jid
-        fallback = conv["msg_flags_out"] if message.from_me else conv["msg_flags_in"]
+        session_type = GROUP if chat.is_group else INDIVIDUAL
+        direction = "out" if message.from_me else "in"
+        label = "group" if chat.is_group else "1to1"
+        fallback = conv["flags_by_type"].get(f"{int(message.from_me)}:{kind_type}", conv[f"msg_flags_{direction}"])
         pk = self.insert("ZWAMESSAGE", "WAMessage", {
             "ZCHATSESSION": session,
-            "ZLASTSESSION": session,
             "ZISFROMME": int(message.from_me),
             "ZMESSAGETYPE": kind_type,
-            "ZMESSAGESTATUS": conv["msg_status_out"] if message.from_me else conv["msg_status_in"],
+            "ZMESSAGESTATUS": conv[f"status_{direction}_{label}"],
             "ZMESSAGEERRORSTATUS": 0,
             "ZSTARRED": int(message.starred),
-            "ZFLAGS": conv["flags_by_type"].get(f"{int(message.from_me)}:{kind_type}", fallback),
+            "ZFLAGS": conv["flags_by_type"].get(f"{session_type}:{int(message.from_me)}:{kind_type}", fallback),
             "ZSPOTLIGHTSTATUS": conv["msg_spot"],
             "ZDOCID": 0,
             "ZCHILDMESSAGESDELIVEREDCOUNT": 0,
@@ -391,7 +433,7 @@ class Writer:
             "ZDATAITEMVERSION": conv["msg_dataver"],
             "ZFILTEREDRECIPIENTCOUNT": 0,
             "ZENCRETRYCOUNT": 0,
-            "ZGROUPEVENTTYPE": conv["event_out"] if message.from_me else conv["event_in"],
+            "ZGROUPEVENTTYPE": conv[f"event_{direction}_{label}"],
             "ZMESSAGEDATE": cocoa(message.timestamp_ms),
             "ZSENTDATE": cocoa(message.timestamp_ms),
             "ZFROMJID": None if message.from_me else (chat.jid if chat.is_group else peer),
@@ -497,5 +539,27 @@ def verify(path: Path) -> list[str]:
         "GROUP BY 1, 2 HAVING COUNT(*) > 1)").fetchone()[0]
     if duplicates:
         problems.append(f"{duplicates} messages are duplicated within a chat")
+    ties = conn.execute(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM ZWAMESSAGE GROUP BY ZCHATSESSION, ZSORT HAVING COUNT(*) > 1)").fetchone()[0]
+    if ties:
+        problems.append(f"{ties} positions are shared by more than one message in a chat")
+    behind = conn.execute(
+        "SELECT COUNT(*) FROM ZWACHATSESSION s WHERE s.ZMESSAGECOUNTER <= "
+        "(SELECT MAX(ZSORT) FROM ZWAMESSAGE WHERE ZCHATSESSION = s.Z_PK)").fetchone()[0]
+    if behind:
+        problems.append(f"{behind} chats would place their next message inside the existing history")
+    one_sided = conn.execute(
+        "SELECT COUNT(*) FROM ZWAMESSAGE m LEFT JOIN ZWACHATSESSION s ON s.ZLASTMESSAGE = m.Z_PK "
+        "WHERE m.ZLASTSESSION IS NOT s.Z_PK").fetchone()[0]
+    if one_sided:
+        problems.append(f"{one_sided} messages disagree with their chat about being its last message")
+    if "ZWAGROUPMEMBER" in tables:
+        anonymous = conn.execute(
+            "SELECT COUNT(*) FROM ZWAMESSAGE m JOIN ZWACHATSESSION s ON s.Z_PK = m.ZCHATSESSION "
+            "LEFT JOIN ZWAGROUPMEMBER g ON g.Z_PK = m.ZGROUPMEMBER "
+            f"WHERE s.ZSESSIONTYPE = {GROUP} AND m.ZISFROMME = 0 AND m.ZMESSAGETYPE NOT IN {SYSTEM_TYPES} "
+            "AND (g.Z_PK IS NULL OR g.ZCHATSESSION IS NOT m.ZCHATSESSION)").fetchone()[0]
+        if anonymous:
+            problems.append(f"{anonymous} incoming group messages have no sender in that group")
     conn.close()
     return problems
