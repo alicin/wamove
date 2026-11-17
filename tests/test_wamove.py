@@ -3,9 +3,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import shutil
 import sqlite3
 import struct
-import sys
 import zlib
 from pathlib import Path
 
@@ -18,7 +18,7 @@ from fixtures import (ALICE, BOB_LID, BOB_PN, GROUP, ME, PASSWORD, UDID, make_ba
 from wamove.android import crypt15, msgstore
 from wamove.cli import main
 from wamove.ios import chatstorage, thumbs
-from wamove.ios.backup import CHATSTORAGE, DIRECTORY, WA_DOMAIN, Backup, BackupError, file_id, mbfile
+from wamove.ios.backup import CHATSTORAGE, DIRECTORY, WA_DOMAIN, Backup, BackupError, clone_domain, file_id, mbfile
 
 KEY = "0123456789abcdef" * 4
 
@@ -119,7 +119,7 @@ def write_png(path: Path, width: int, height: int) -> None:
                      + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="thumbnails use sips")
+@pytest.mark.skipif(not (shutil.which("sips") or shutil.which("magick")), reason="thumbnails need sips or ImageMagick")
 def test_image_thumbnail(tmp_path: Path) -> None:
     make_msgstore(tmp_path / "msgstore.db")
     make_media(tmp_path / "Media")
@@ -141,6 +141,16 @@ def test_image_thumbnail(tmp_path: Path) -> None:
     assert item[1] == item[0].rsplit(".", 1)[0] + ".thumb"
     assert "Message/" + item[1] == thumb.relative_path
     assert (item[2], item[3]) == (480, 640)
+
+
+@pytest.mark.skipif(bool(shutil.which("sips")) or not shutil.which("magick"), reason="tests the ImageMagick path")
+def test_imagemagick_only_decodes_photos(tmp_path: Path) -> None:
+    disguised = tmp_path / "IMG-001.jpg"
+    disguised.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20"/>')
+    assert thumbs.dimensions(str(disguised)) is None
+    assert thumbs.image(str(disguised), tmp_path / "IMG-001.thumb") is None
+    write_png(disguised, 30, 20)
+    assert thumbs.dimensions(str(disguised)) == (30, 20)
 
 
 @pytest.mark.parametrize("password", [None, PASSWORD])
@@ -197,6 +207,24 @@ def test_prune(tmp_path: Path) -> None:
         domains = {r[0] for r in reopened.conn.execute("SELECT DISTINCT domain FROM Files")}
         assert domains == {WA_DOMAIN}
         assert reopened.get(CHATSTORAGE) and reopened.get("") and reopened.check() == []
+
+
+@pytest.mark.parametrize("password", [None, PASSWORD])
+def test_clone_domain_leaves_source_untouched(tmp_path: Path, password: str | None) -> None:
+    make_chatstorage(tmp_path / CHATSTORAGE)
+    full = make_backup(tmp_path / "full" / UDID, tmp_path / CHATSTORAGE, password)
+    before = {p.relative_to(full): p.read_bytes() for p in full.rglob("*") if p.is_file()}
+    other = file_id("HomeDomain", "Library/Preferences/com.apple.example.plist")
+    copy = tmp_path / "pristine" / UDID
+    clone_domain(full, copy, password)
+    assert {p.relative_to(full): p.read_bytes() for p in full.rglob("*") if p.is_file()} == before
+    assert not (copy / other[:2] / other).exists()
+    with Backup(copy, password) as reopened:
+        domains = {r[0] for r in reopened.conn.execute("SELECT DISTINCT domain FROM Files")}
+        assert domains == {WA_DOMAIN}
+        assert reopened.check() == []
+        out = tmp_path / "out.sqlite"
+        assert reopened.read(CHATSTORAGE, out) and out.read_bytes() == (tmp_path / CHATSTORAGE).read_bytes()
 
 
 def test_build_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

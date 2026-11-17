@@ -151,9 +151,8 @@ def backup(work: Work, args: argparse.Namespace) -> None:
     password = backup_password(full)
     for stale in (work.pristine / udid, work.patched / udid):
         shutil.rmtree(stale, ignore_errors=True)
-    ios_backup.clone_tree(full, work.pristine / udid)
+    ios_backup.clone_domain(full, work.pristine / udid, password)
     with ios_backup.Backup(work.pristine / udid, password) as saved:
-        saved.prune()
         if not saved.get(CHATSTORAGE):
             raise Failure("WhatsApp is not in this backup: install it on the iPhone, register, and back up again")
         count = saved.count()

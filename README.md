@@ -2,10 +2,10 @@
 
 Move WhatsApp chats and media from an Android phone to an iPhone that is **already set up**, without erasing the iPhone.
 
-WhatsApp's own Android → iPhone transfer only works while setting up a new or erased iPhone, through the Move to iOS app. If the iPhone is already in use, the official answer is to reset it. wamove works around that by editing WhatsApp's data inside an iPhone backup on your Mac and restoring only that data.
+WhatsApp's own Android → iPhone transfer only works while setting up a new or erased iPhone, through the Move to iOS app. If the iPhone is already in use, the official answer is to reset it. wamove works around that by editing WhatsApp's data inside an iPhone backup on your computer and restoring only that data.
 
 > [!WARNING]
-> This uses undocumented formats and is not supported by WhatsApp or Apple. Keep the Android phone and its backup until you are happy with the result. If something goes wrong, `wamove rollback` puts back WhatsApp's data as it was before, and a full iPhone backup stays on your Mac.
+> This uses undocumented formats and is not supported by WhatsApp or Apple. Keep the Android phone and its backup until you are happy with the result. If something goes wrong, `wamove rollback` puts back WhatsApp's data as it was before, and a full iPhone backup stays on your computer.
 >
 > The restore makes the iPhone go through its setup screens. Afterwards the home screen layout may be reset and some apps, WhatsApp included, may show faded icons until they are downloaded again. Their data stays.
 
@@ -17,16 +17,22 @@ WhatsApp's own Android → iPhone transfer only works while setting up a new or 
 4. `build` adds the Android chats and media to WhatsApp's iPhone database (`ChatStorage.sqlite`) in that copy. It learns the conventions from the rows WhatsApp itself wrote on the iPhone, so the new rows look like WhatsApp's own.
 5. `restore` restores the WhatsApp-only copy to the iPhone. Everything else on the phone is left alone.
 
-Nothing is uploaded anywhere. Both phones talk to the Mac over USB.
+Nothing is uploaded anywhere. Both phones talk to the computer over USB.
 
 ## Requirements
 
-- A Mac with the Xcode Command Line Tools (`xcode-select --install`)
+- A Mac with the Xcode Command Line Tools (`xcode-select --install`), or a Linux PC (see below)
 - [uv](https://docs.astral.sh/uv/) (`brew install uv`)
 - `adb` (`brew install --cask android-platform-tools`)
 - A USB cable for each phone
 - Free disk space for a full iPhone backup plus the Android media. `wamove doctor` shows both.
 - WhatsApp (not WhatsApp Business) on both phones, with the same phone number
+
+On Linux, install these from your distribution instead of Homebrew:
+
+- `usbmuxd`, so the computer can reach the iPhone
+- `adb`, with udev rules that let your user open the Android phone (on Arch: `android-tools` and `android-udev`)
+- ImageMagick 7 (`magick`) and `ffmpeg` for photo and video thumbnails. Without them media still comes across, without thumbnails.
 
 ## Install
 
@@ -47,7 +53,7 @@ uv tool install --python 3.13 git+https://github.com/alicin/wamove.git
 
 1. In WhatsApp, open Settings → Chats → Chat backup → End-to-end encrypted backup, turn it on and choose **Use 64-digit encryption key instead**. Save the key.
 2. Tap **Back up**. A backup made before the key was set cannot be decrypted with it.
-3. Turn on USB debugging (Settings → Developer options), plug the phone into the Mac and allow it.
+3. Turn on USB debugging (Settings → Developer options), plug the phone into the computer and allow it.
 
 ```sh
 wamove doctor     # checks both phones and free space
@@ -63,7 +69,7 @@ wamove decrypt    # asks for the 64-digit key
 4. Turn on Airplane mode and turn off Wi-Fi, so no new messages arrive until the restore is done. They wait on WhatsApp's servers and arrive afterwards.
 5. Turn off Find My (Settings → your name → Find My). Restores are refused while it is on. Turning it off may need Airplane mode off for a moment: open WhatsApp again before switching Airplane mode back on.
 
-Plug the iPhone into the Mac, unlock it and trust the Mac.
+Plug the iPhone into the computer, unlock it and trust the computer.
 
 ```sh
 wamove backup     # full backup, then a WhatsApp-only copy; asks for the backup password if backups are encrypted
@@ -131,6 +137,7 @@ Tested once, in September 2026, from a Pixel 10 Pro XL to an iPhone on iOS 27.0:
 - **`adb` sees no device:** unlock the Android phone and accept the USB debugging prompt. `adb devices` should list it as `device`, not `unauthorized`.
 - **No WhatsApp backup found on Android:** wamove looks in `Android/media/com.whatsapp/WhatsApp`. Make a backup in WhatsApp first.
 - **`decrypt` fails:** the backup must be made after the 64-digit key was set. Make a new backup on the Android phone, then run `pull` again.
+- **`doctor` cannot reach the iPhone on Linux:** `usbmuxd` is not installed or not running. Install it and plug the iPhone in again.
 - **The restore is refused:** turn off Find My on the iPhone and run `wamove restore` again.
 - **WhatsApp is not in the iPhone backup:** install and register WhatsApp on the iPhone, then run `backup` again.
 

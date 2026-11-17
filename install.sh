@@ -1,12 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-[[ "$(uname -s)" == Darwin ]] || exit 0
+case "$(uname -s)" in Darwin | Linux) ;; *) exit 0 ;; esac
 
 src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if ! command -v uv >/dev/null 2>&1; then
-    echo "wamove: skipped, uv is not installed (brew install uv)" >&2
+    echo "wamove: skipped, uv is not installed (see https://docs.astral.sh/uv/)" >&2
     exit 0
 fi
 

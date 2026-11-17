@@ -40,6 +40,26 @@ def clone_tree(src: Path, dst: Path) -> None:
         shutil.copytree(src, dst)
 
 
+def clone_domain(src: Path, dst: Path, password: str | None, domain: str = WA_DOMAIN) -> None:
+    """Copy one domain out of a backup without first copying the whole backup.
+
+    `cp -c` makes clone_tree free on APFS, but elsewhere it is a full copy, which can need as much
+    free space again as the iPhone has data.
+    """
+    dst.mkdir(parents=True)
+    for item in src.iterdir():
+        if item.is_file():
+            shutil.copy2(item, dst / item.name)
+    with Backup(dst, password) as copy:
+        rows = copy.conn.execute("SELECT fileID FROM Files WHERE domain=? AND flags=?", (domain, FILE)).fetchall()
+        for (fid,) in rows:
+            source = src / fid[:2] / fid
+            if source.is_file():
+                copy.payload_path(fid).parent.mkdir(exist_ok=True)
+                shutil.copy2(source, copy.payload_path(fid))
+        copy.prune(domain)
+
+
 def is_encrypted(path: Path) -> bool:
     return bool(plistlib.loads((path / "Manifest.plist").read_bytes()).get("IsEncrypted"))
 
