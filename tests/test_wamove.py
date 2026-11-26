@@ -89,7 +89,11 @@ def test_writer(tmp_path: Path) -> None:
         assert [r[0] for r in rows] == list(range(1, len(rows) + 1))
         assert [r[1] for r in rows] == sorted(r[1] for r in rows)
     counters = dict(conn.execute("SELECT Z_PK, ZMESSAGECOUNTER FROM ZWACHATSESSION"))
-    assert counters == {1: 8, 2: 3, 3: 2}
+    # WhatsApp convention: counter = highest ZSORT + 1
+    assert counters == {1: 9, 2: 4, 3: 3}
+    for session, counter in counters.items():
+        top = conn.execute("SELECT MAX(ZSORT) FROM ZWAMESSAGE WHERE ZCHATSESSION=?", (session,)).fetchone()[0]
+        assert counter == top + 1
     hashed = conn.execute("SELECT i.ZVCARDNAME FROM ZWAMESSAGE m JOIN ZWAMEDIAITEM i ON i.Z_PK = m.ZMEDIAITEM "
                           "WHERE m.ZSTANZAID='K102'").fetchone()[0]
     assert hashed == base64.b64encode(hashlib.sha256(b"\xff\xd8jpegdata!!").digest()).decode()
