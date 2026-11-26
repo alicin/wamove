@@ -252,6 +252,9 @@ class Writer:
                 "SELECT Z_PK FROM ZWAMESSAGE WHERE ZCHATSESSION=? ORDER BY ZMESSAGEDATE, Z_PK", (session,)).fetchall()
             self.conn.executemany("UPDATE ZWAMESSAGE SET ZSORT=? WHERE Z_PK=?",
                                   [(i, r[0]) for i, r in enumerate(rows, 1)])
+            # WhatsApp keeps ZMESSAGECOUNTER = highest ZSORT + 1. Merged chats (e.g. groups that
+            # already synced to the iPhone) otherwise keep a stale, much larger counter.
+            self.conn.execute("UPDATE ZWACHATSESSION SET ZMESSAGECOUNTER=? WHERE Z_PK=?", (len(rows) + 1, session))
         for name, entity in self.entities.items():
             self.conn.execute("UPDATE Z_PRIMARYKEY SET Z_MAX=? WHERE Z_NAME=?", (entity["max"], name))
         self.conn.commit()
@@ -354,8 +357,8 @@ class Writer:
         previous = existing["ZLASTMESSAGEDATE"] if existing else None
         if previous is None or last_date >= previous:
             values.update({"ZLASTMESSAGE": last_pk, "ZLASTMESSAGEDATE": last_date})
-            if not self.conv["lasttext_is_blob"]:
-                values["ZLASTMESSAGETEXT"] = last_text
+            # The blob form references the previous last message's key; clear it when it no longer matches.
+            values["ZLASTMESSAGETEXT"] = None if self.conv["lasttext_is_blob"] else last_text
         self.update("ZWACHATSESSION", session, values)
         return session
 
