@@ -59,6 +59,32 @@ def test_parse_msgstore(tmp_path: Path) -> None:
     assert [(m.key_id, m.kind.value) for m in chats[BOB_PN].messages] == [("K114", "text"), ("K117", "unknown")]
 
 
+def test_parse_msgstore_merges_hd_copies(tmp_path: Path) -> None:
+    make_msgstore(tmp_path / "msgstore.db")
+    conn = sqlite3.connect(tmp_path / "msgstore.db")
+    conn.executescript("""
+        CREATE TABLE message_association (_id INTEGER PRIMARY KEY AUTOINCREMENT, child_message_row_id INTEGER NOT NULL,
+                                          parent_message_row_id INTEGER NOT NULL, association_type INTEGER NOT NULL);
+        INSERT INTO message VALUES (130, 10, 0, 'K130', 2, 0, 1726000003500, 1, NULL, 0);
+        INSERT INTO message VALUES (131, 10, 0, 'K131', 2, 0, 1726000020000, 3, NULL, 0);
+        INSERT INTO message VALUES (132, 10, 0, 'K132', 2, 0, 1726000090000, 3, NULL, 0);
+        INSERT INTO message_media VALUES (130, 10, 'Media/WhatsApp Images/IMG-001-HD.jpg', 40, 'image/jpeg',
+                                          NULL, NULL, 2048, 1536);
+        INSERT INTO message_media VALUES (131, 10, 'Media/WhatsApp Video/VID-002.mp4', 50, 'video/mp4',
+                                          NULL, 5, 464, 832);
+        INSERT INTO message_media VALUES (132, 10, NULL, 0, 'video/mp4', NULL, 5, 720, 1280);
+        INSERT INTO message_association (child_message_row_id, parent_message_row_id, association_type)
+            VALUES (130, 102, 12), (132, 131, 7);
+    """)
+    conn.close()
+    messages = {m.key_id: m for m in next(c for c in msgstore.parse(tmp_path / "msgstore.db").chats
+                                          if c.jid == ALICE).messages}
+    assert "K130" not in messages and "K132" not in messages
+    assert messages["K102"].media.android_path == "Media/WhatsApp Images/IMG-001-HD.jpg"
+    assert messages["K102"].media.caption == "look at this"
+    assert messages["K131"].media.android_path == "Media/WhatsApp Video/VID-002.mp4"
+
+
 def import_fixture(tmp_path: Path) -> tuple[Path, chatstorage.Report]:
     make_msgstore(tmp_path / "msgstore.db")
     make_media(tmp_path / "Media")
