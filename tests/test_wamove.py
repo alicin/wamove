@@ -96,6 +96,15 @@ def import_fixture(tmp_path: Path) -> tuple[Path, chatstorage.Report]:
     return tmp_path / CHATSTORAGE, report
 
 
+def test_media_file_names_are_stable_across_builds(tmp_path: Path) -> None:
+    (tmp_path / "first").mkdir()
+    (tmp_path / "second").mkdir()
+    first = sorted(f.relative_path for f in import_fixture(tmp_path / "first")[1].media_files)
+    second = sorted(f.relative_path for f in import_fixture(tmp_path / "second")[1].media_files)
+    assert first and first == second
+    assert len(set(first)) == len(first)
+
+
 def test_writer(tmp_path: Path) -> None:
     database, report = import_fixture(tmp_path)
     assert chatstorage.verify(database) == []
