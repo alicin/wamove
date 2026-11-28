@@ -118,7 +118,7 @@ class Writer:
     def __init__(self, path: Path, lids: dict[str, str] | None = None):
         if not path.is_file():
             raise ChatStorageError(f"{path} not found")
-        self.conn = sqlite3.connect(path)
+        self.conn = sqlite3.connect(path.resolve().as_uri(), uri=True)
         self.conn.row_factory = sqlite3.Row
         self.lids = lids or {}
         self.thumbnails: Path | None = None
