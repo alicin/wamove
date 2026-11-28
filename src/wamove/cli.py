@@ -9,12 +9,13 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 
 from . import __version__
 from .android import adb, crypt15, msgstore
 from .ios import backup as ios_backup
-from .ios import chatstorage, device
+from .ios import chatstorage, device, history
 from .model import Archive
 
 CHATSTORAGE = ios_backup.CHATSTORAGE
@@ -35,7 +36,6 @@ class Work:
         self.full = root / "ios" / "full"
         self.pristine = root / "ios" / "pristine"
         self.patched = root / "ios" / "patched"
-        self.build = root / "ios" / "build"
 
     def udid(self) -> str:
         found = [p.name for p in self.pristine.iterdir() if (p / "Manifest.db").is_file()] \
@@ -165,36 +165,64 @@ def build(work: Work, args: argparse.Namespace) -> None:
     udid = work.udid()
     pristine = work.pristine / udid
     password = backup_password(pristine)
-    archive = load_archive(work, args.contacts)
-    print("Android chats:")
-    print_stats(archive)
-    shutil.rmtree(work.build, ignore_errors=True)
-    work.build.mkdir(parents=True)
-    shutil.rmtree(work.patched / udid, ignore_errors=True)
-    ios_backup.clone_tree(pristine, work.patched / udid)
-    database = work.build / CHATSTORAGE
-    with ios_backup.Backup(work.patched / udid, password) as target:
-        for name in (CHATSTORAGE, CHATSTORAGE + "-wal"):
-            target.read(name, work.build / name)
-        writer = chatstorage.Writer(database, archive.lids)
-        media = None if args.no_media or not work.media.is_dir() else work.media
-        (work.build / "thumbs").mkdir()
-        report = writer.import_archive(archive, media, work.build / "thumbs")
-        writer.close()
+    if not work.msgstore.is_file():
+        raise Failure("the Android chats are not decrypted yet; run `wamove decrypt` first")
+    archive = None if args.repair_only else load_archive(work, args.contacts)
+    if archive is not None:
+        print("Android chats:")
+        print_stats(archive)
+    work.patched.mkdir(parents=True, exist_ok=True)
+    output = work.patched / udid
+    with tempfile.TemporaryDirectory(dir=work.patched) as staging:
+        stage = Path(staging)
+        candidate = stage / udid
+        ios_backup.clone_tree(pristine, candidate)
+        _build_backup(work, stage, candidate, password, archive, args.no_media)
+        previous = stage / "previous"
+        if output.exists():
+            output.rename(previous)
+        try:
+            candidate.rename(output)
+        except BaseException:
+            if previous.exists():
+                previous.rename(output)
+            raise
+    print(f"Ready to restore: {output}")
+
+
+def _build_backup(
+    work: Work, scratch: Path, candidate: Path, password: str | None, archive: Archive | None, no_media: bool
+) -> None:
+    database = scratch / CHATSTORAGE
+    with ios_backup.Backup(candidate, password) as target:
+        for name in (CHATSTORAGE, CHATSTORAGE + "-wal", "LID.sqlite", "LID.sqlite-wal"):
+            target.read(name, scratch / name)
+        report = None
+        with closing(chatstorage.Writer(database, archive.lids if archive is not None else None)) as writer:
+            if archive is not None:
+                media = None if no_media or not work.media.is_dir() else work.media
+                thumbnails = scratch / "thumbs"
+                thumbnails.mkdir()
+                report = writer.import_archive(archive, media, thumbnails)
+            metadata = history.repair(writer, work.msgstore, scratch / "LID.sqlite")
         problems = chatstorage.verify(database)
         if problems:
             raise Failure("the converted database failed its checks:\n  " + "\n  ".join(problems))
-        print(f"  {report.sessions_created} chats created, {report.sessions_reused} merged into existing ones")
-        print(f"  {report.messages_written} messages added, {report.messages_skipped} were already there")
-        print(f"  {report.media_linked} media files found, {report.media_missing} missing on the Android phone, "
-              f"{report.thumbnails} thumbnails made")
+        if report is not None:
+            print(f"  {report.sessions_created} chats created, {report.sessions_reused} merged into existing ones")
+            print(f"  {report.messages_written} messages added, {report.messages_skipped} were already there")
+            print(f"  {report.media_linked} media files found, {report.media_missing} missing on the Android phone, "
+                  f"{report.thumbnails} thumbnails made")
+        print(f"  {metadata.mentions} mention links and {metadata.reactions} reactions added")
         target.put(CHATSTORAGE, database)
-        empty = work.build / "empty"
+        empty = scratch / "empty"
         empty.write_bytes(b"")
         for suffix in ("-wal", "-shm"):
-            target.put(CHATSTORAGE + suffix, empty)
-        total = len(report.media_files)
-        for done, item in enumerate(report.media_files, 1):
+            if archive is not None or target.get(CHATSTORAGE + suffix):
+                target.put(CHATSTORAGE + suffix, empty)
+        files = report.media_files if report is not None else []
+        total = len(files)
+        for done, item in enumerate(files, 1):
             target.put(item.relative_path, Path(item.source))
             if done % 100 == 0 or done == total:
                 sys.stdout.write(f"\r  added {done}/{total} media files to the backup")
@@ -204,7 +232,6 @@ def build(work: Work, args: argparse.Namespace) -> None:
         problems = target.check()
         if problems:
             raise Failure("the modified backup failed its checks:\n  " + "\n  ".join(problems[:20]))
-    print(f"Ready to restore: {work.patched / udid}")
 
 
 def inspect(work: Work, args: argparse.Namespace) -> None:
@@ -264,6 +291,8 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("backup", help="back up the iPhone and keep a WhatsApp-only copy")
     command = commands.add_parser("build", help="add the Android chats to the WhatsApp-only copy")
     command.add_argument("--no-media", action="store_true")
+    command.add_argument("--repair-only", action="store_true",
+                         help="add mentions and reactions to already imported messages in a fresh iPhone backup")
     commands.add_parser("inspect", help="show what is in the Android chats and the iPhone backup")
     commands.add_parser("restore", help="put the built WhatsApp data on the iPhone")
     commands.add_parser("rollback", help="put the untouched WhatsApp data back on the iPhone")

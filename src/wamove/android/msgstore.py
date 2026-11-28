@@ -27,6 +27,8 @@ TYPES = {
 }
 SKIPPED_KINDS = (Kind.SYSTEM, Kind.REVOKED)
 SKIPPED_SUFFIXES = ("@broadcast", "@newsletter", "@bot")
+# message_association types linking an HD copy (child) to the standard photo (12) or video (7) it upgrades
+HD_ASSOCIATIONS = (7, 12)
 
 
 class MsgstoreError(Exception):
@@ -151,8 +153,23 @@ def parse(path: Path, contacts: dict[str, str] | None = None) -> Archive:
     else:
         extra.append("NULL AS vcard")
 
+    # WhatsApp sends an HD photo or video as two messages: the standard copy and an HD copy that arrives
+    # moments later. Android shows them as one bubble; importing both would show every item twice.
+    hd_parent: dict[int, int] = {}
+    if {"child_message_row_id", "parent_message_row_id", "association_type"} <= tables.get("message_association",
+                                                                                          set()):
+        hd_parent = dict(conn.execute(
+            "SELECT a.child_message_row_id, a.parent_message_row_id FROM message_association a "
+            "JOIN message c ON c._id = a.child_message_row_id JOIN message p ON p._id = a.parent_message_row_id "
+            f"WHERE a.association_type IN ({', '.join(map(str, HD_ASSOCIATIONS))}) "
+            "AND c.chat_row_id = p.chat_row_id AND c.message_type = p.message_type"
+        ).fetchall())
+    imported: dict[int, Message] = {}
+    hd_media: dict[int, Media] = {}
+
     message_sql = (
-        "SELECT message.chat_row_id AS chat_id, message.from_me AS from_me, message.key_id AS key_id, "
+        "SELECT message._id AS row_id, message.chat_row_id AS chat_id, message.from_me AS from_me, "
+        "message.key_id AS key_id, "
         "message.timestamp AS ts, message.message_type AS type, message.text_data AS text, "
         f"{_col(tables, 'message', 'starred', '0')}, sender.raw_string AS sender, {', '.join(extra)} "
         "FROM message LEFT JOIN jid sender ON sender._id = message.sender_jid_row_id "
@@ -179,6 +196,10 @@ def parse(path: Path, contacts: dict[str, str] | None = None) -> Archive:
             )
             if kind is Kind.AUDIO and _is_voice(row["mime_type"], row["file_path"]):
                 kind = Kind.VOICE
+        if row["row_id"] in hd_parent:
+            if media is not None and media.android_path:
+                hd_media[hd_parent[row["row_id"]]] = media
+            continue
         location = None
         if kind is Kind.LOCATION and row["latitude"] is not None:
             location = Location(float(row["latitude"]), float(row["longitude"] or 0), row["place_name"])
@@ -186,7 +207,7 @@ def parse(path: Path, contacts: dict[str, str] | None = None) -> Archive:
         if kind in (Kind.TEXT, Kind.UNKNOWN) and not text:
             continue
         sender = phone(row["sender"]) if "@" in (row["sender"] or "") and not row["from_me"] else None
-        chat.messages.append(Message(
+        message = Message(
             key_id=row["key_id"],
             from_me=bool(row["from_me"]),
             timestamp_ms=int(row["ts"]),
@@ -197,8 +218,15 @@ def parse(path: Path, contacts: dict[str, str] | None = None) -> Archive:
             location=location,
             vcard=row["vcard"],
             starred=bool(row["starred"]),
-        ))
+        )
+        chat.messages.append(message)
+        imported[row["row_id"]] = message
     conn.close()
+    for parent_id, media in hd_media.items():
+        parent = imported.get(parent_id)
+        if parent is not None and parent.media is not None:
+            media.caption = parent.media.caption or media.caption
+            parent.media = media
 
     chats = [c for c in by_jid.values() if c.messages]
     names: dict[str, str] = {}

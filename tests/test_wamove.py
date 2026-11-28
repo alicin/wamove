@@ -59,6 +59,32 @@ def test_parse_msgstore(tmp_path: Path) -> None:
     assert [(m.key_id, m.kind.value) for m in chats[BOB_PN].messages] == [("K114", "text"), ("K117", "unknown")]
 
 
+def test_parse_msgstore_merges_hd_copies(tmp_path: Path) -> None:
+    make_msgstore(tmp_path / "msgstore.db")
+    conn = sqlite3.connect(tmp_path / "msgstore.db")
+    conn.executescript("""
+        CREATE TABLE message_association (_id INTEGER PRIMARY KEY AUTOINCREMENT, child_message_row_id INTEGER NOT NULL,
+                                          parent_message_row_id INTEGER NOT NULL, association_type INTEGER NOT NULL);
+        INSERT INTO message VALUES (130, 10, 0, 'K130', 2, 0, 1726000003500, 1, NULL, 0);
+        INSERT INTO message VALUES (131, 10, 0, 'K131', 2, 0, 1726000020000, 3, NULL, 0);
+        INSERT INTO message VALUES (132, 10, 0, 'K132', 2, 0, 1726000090000, 3, NULL, 0);
+        INSERT INTO message_media VALUES (130, 10, 'Media/WhatsApp Images/IMG-001-HD.jpg', 40, 'image/jpeg',
+                                          NULL, NULL, 2048, 1536);
+        INSERT INTO message_media VALUES (131, 10, 'Media/WhatsApp Video/VID-002.mp4', 50, 'video/mp4',
+                                          NULL, 5, 464, 832);
+        INSERT INTO message_media VALUES (132, 10, NULL, 0, 'video/mp4', NULL, 5, 720, 1280);
+        INSERT INTO message_association (child_message_row_id, parent_message_row_id, association_type)
+            VALUES (130, 102, 12), (132, 131, 7);
+    """)
+    conn.close()
+    messages = {m.key_id: m for m in next(c for c in msgstore.parse(tmp_path / "msgstore.db").chats
+                                          if c.jid == ALICE).messages}
+    assert "K130" not in messages and "K132" not in messages
+    assert messages["K102"].media.android_path == "Media/WhatsApp Images/IMG-001-HD.jpg"
+    assert messages["K102"].media.caption == "look at this"
+    assert messages["K131"].media.android_path == "Media/WhatsApp Video/VID-002.mp4"
+
+
 def import_fixture(tmp_path: Path) -> tuple[Path, chatstorage.Report]:
     make_msgstore(tmp_path / "msgstore.db")
     make_media(tmp_path / "Media")
@@ -68,6 +94,15 @@ def import_fixture(tmp_path: Path) -> tuple[Path, chatstorage.Report]:
     report = writer.import_archive(archive, tmp_path / "Media")
     writer.close()
     return tmp_path / CHATSTORAGE, report
+
+
+def test_media_file_names_are_stable_across_builds(tmp_path: Path) -> None:
+    (tmp_path / "first").mkdir()
+    (tmp_path / "second").mkdir()
+    first = sorted(f.relative_path for f in import_fixture(tmp_path / "first")[1].media_files)
+    second = sorted(f.relative_path for f in import_fixture(tmp_path / "second")[1].media_files)
+    assert first and first == second
+    assert len(set(first)) == len(first)
 
 
 def test_writer(tmp_path: Path) -> None:
@@ -101,6 +136,13 @@ def test_writer(tmp_path: Path) -> None:
     caption = conn.execute("SELECT i.ZTITLE, i.ZVCARDSTRING, m.ZTEXT FROM ZWAMESSAGE m JOIN ZWAMEDIAITEM i "
                            "ON i.Z_PK = m.ZMEDIAITEM WHERE m.ZSTANZAID='K102'").fetchone()
     assert caption == ("look at this", "image/jpeg", None)
+    gallery_sections = dict(conn.execute(
+        "SELECT ZSTANZAID, ZMEDIASECTIONID FROM ZWAMESSAGE WHERE ZSTANZAID IN ('K102', 'K108')"))
+    assert gallery_sections == {"K102": "2024-09", "K108": None}
+    sticker_path = conn.execute(
+        "SELECT i.ZMEDIALOCALPATH FROM ZWAMESSAGE m JOIN ZWAMEDIAITEM i ON i.Z_PK=m.ZMEDIAITEM "
+        "WHERE m.ZSTANZAID='K108'").fetchone()[0]
+    assert sticker_path.endswith(".webp")
     maxima = dict(conn.execute("SELECT Z_NAME, Z_MAX FROM Z_PRIMARYKEY"))
     assert maxima["WAMessage"] == conn.execute("SELECT MAX(Z_PK) FROM ZWAMESSAGE").fetchone()[0]
     conn.close()

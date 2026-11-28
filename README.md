@@ -89,7 +89,8 @@ When you are happy, delete `~/wamove`. It holds your decrypted chats.
 | `decrypt [--key-file FILE]` | Decrypts the chat backup and prints how many chats and messages it has |
 | `backup` | Takes a full iPhone backup and makes the WhatsApp-only copy |
 | `inspect` | Shows the Android chats and what is in the iPhone's WhatsApp database |
-| `build [--no-media]` | Writes the Android chats (and media) into the WhatsApp-only copy and checks the result |
+| `build [--no-media]` | Writes the Android chats, media, supported @mentions and reactions into the WhatsApp-only copy and checks the result |
+| `build --repair-only` | Adds supported @mentions and reactions to matching messages already in the iPhone backup |
 | `restore` | Restores the built copy to the iPhone |
 | `rollback` | Restores the untouched WhatsApp-only copy to the iPhone |
 
@@ -117,7 +118,11 @@ The work folder looks like this:
 
 Text messages, photos, videos, voice notes, audio, documents, GIFs, stickers, locations and contact cards, with their original dates. Chats that already exist on the iPhone are merged, and messages that are already there are skipped.
 
-Not moved: system messages ("X joined"), deleted-message markers, call logs, reactions, polls, status updates and channels.
+Supported text @mentions and reactions also come across when wamove can match the message and resolve the WhatsApp account ID. Existing iPhone mentions and reactions take precedence.
+
+If you already migrated and still have the decrypted Android backup, take a fresh iPhone backup with `wamove backup`, then run `wamove build --repair-only`. The restore copy contains the iPhone WhatsApp history and media captured by that backup, with the mention and reaction repairs applied. Check the reported counts before running `wamove restore`.
+
+Not moved: system messages ("X joined"), deleted-message markers, call logs, polls, status updates and channels.
 
 ## Known issues
 

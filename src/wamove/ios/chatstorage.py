@@ -33,6 +33,7 @@ IOS_TYPE = {
 INDIVIDUAL = 0
 GROUP = 1
 MEDIA_PREFIX = "Message/"
+MEDIA_NAMESPACE = uuid.UUID("5b0f3c1e-8a4d-4f6e-9c2b-7d1a0e6f4b38")  # names imported media files
 SYSTEM_TYPES = (6, 10)
 VISUAL_KINDS = frozenset({Kind.IMAGE, Kind.VIDEO, Kind.GIF, Kind.STICKER})
 
@@ -118,7 +119,7 @@ class Writer:
     def __init__(self, path: Path, lids: dict[str, str] | None = None):
         if not path.is_file():
             raise ChatStorageError(f"{path} not found")
-        self.conn = sqlite3.connect(path)
+        self.conn = sqlite3.connect(path.resolve().as_uri(), uri=True)
         self.conn.row_factory = sqlite3.Row
         self.lids = lids or {}
         self.thumbnails: Path | None = None
@@ -397,7 +398,7 @@ class Writer:
             "ZFROMJID": None if message.from_me else (chat.jid if chat.is_group else peer),
             "ZTOJID": (chat.jid if chat.is_group else peer) if message.from_me else None,
             "ZSTANZAID": message.key_id,
-            "ZMEDIASECTIONID": _section(message.timestamp_ms) if is_media else None,
+            "ZMEDIASECTIONID": _section(message.timestamp_ms) if is_media and message.kind is not Kind.STICKER else None,
             "ZTEXT": text,
             "ZPUSHNAME": push_name,
             "ZGROUPMEMBER": member,
@@ -435,7 +436,9 @@ class Writer:
         size = (media.width, media.height) if media.width and media.height else None
         local = _locate(media.android_path, media_root) if media_root else None
         if local:
-            name = str(uuid.uuid4())
+            # Derived from the message, so rebuilding and restoring again overwrites the same files
+            # instead of leaving the previous restore's copies behind on the iPhone.
+            name = str(uuid.uuid5(MEDIA_NAMESPACE, f"{media_dir}/{int(message.from_me)}/{message.key_id}"))
             stem = f"Media/{media_dir}/{name[0]}/{name[1]}/{name}"
             path = stem + os.path.splitext(local)[1].lower()
             values["ZMEDIALOCALPATH"] = path
