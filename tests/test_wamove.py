@@ -101,6 +101,13 @@ def test_writer(tmp_path: Path) -> None:
     caption = conn.execute("SELECT i.ZTITLE, i.ZVCARDSTRING, m.ZTEXT FROM ZWAMESSAGE m JOIN ZWAMEDIAITEM i "
                            "ON i.Z_PK = m.ZMEDIAITEM WHERE m.ZSTANZAID='K102'").fetchone()
     assert caption == ("look at this", "image/jpeg", None)
+    gallery_sections = dict(conn.execute(
+        "SELECT ZSTANZAID, ZMEDIASECTIONID FROM ZWAMESSAGE WHERE ZSTANZAID IN ('K102', 'K108')"))
+    assert gallery_sections == {"K102": "2024-09", "K108": None}
+    sticker_path = conn.execute(
+        "SELECT i.ZMEDIALOCALPATH FROM ZWAMESSAGE m JOIN ZWAMEDIAITEM i ON i.Z_PK=m.ZMEDIAITEM "
+        "WHERE m.ZSTANZAID='K108'").fetchone()[0]
+    assert sticker_path.endswith(".webp")
     maxima = dict(conn.execute("SELECT Z_NAME, Z_MAX FROM Z_PRIMARYKEY"))
     assert maxima["WAMessage"] == conn.execute("SELECT MAX(Z_PK) FROM ZWAMESSAGE").fetchone()[0]
     conn.close()

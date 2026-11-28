@@ -397,7 +397,7 @@ class Writer:
             "ZFROMJID": None if message.from_me else (chat.jid if chat.is_group else peer),
             "ZTOJID": (chat.jid if chat.is_group else peer) if message.from_me else None,
             "ZSTANZAID": message.key_id,
-            "ZMEDIASECTIONID": _section(message.timestamp_ms) if is_media else None,
+            "ZMEDIASECTIONID": _section(message.timestamp_ms) if is_media and message.kind is not Kind.STICKER else None,
             "ZTEXT": text,
             "ZPUSHNAME": push_name,
             "ZGROUPMEMBER": member,
